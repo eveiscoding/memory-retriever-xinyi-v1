@@ -29,7 +29,13 @@ from __future__ import annotations
 import os
 
 from .config import RetrieverConfig
-from .retriever import AddResult, Evidence, RetrieverDB, SearchResult
+from .retriever import (
+    AddResult,
+    Evidence,
+    IdempotencyConflictError,
+    RetrieverDB,
+    SearchResult,
+)
 
 
 class ApiError(Exception):
@@ -206,11 +212,8 @@ class MemoryService:
     def official_add(self, payload: dict) -> dict:
         """官方 Add。
 
-        幂等语义（本实现的选择，官方未声明）：以 (request_id, user_id) 为幂等键，
-        首次写入生效；同键重复提交即使 messages 内容不同，也**不会**覆盖或追加，
-        直接回显成功。理由是官方把 request_id 定位为一次写请求的标识，
-        重试比"改写历史"更可能是真实场景；静默追加会在重试时污染记忆库。
-        该行为由 tests/test_api_contract.py 锁定。
+        幂等键是 (request_id, user_id)。完全相同的重试返回成功；如果同键被复用
+        到不同 session/messages，则返回 409，避免静默吞掉调用方的新数据。
         """
         data = validate_add_payload(payload)
         try:
@@ -220,6 +223,8 @@ class MemoryService:
                 session_id=data["session_id"],
                 messages=data["messages"],
             )
+        except IdempotencyConflictError as exc:
+            raise ApiError(409, str(exc)) from exc
         except ValueError as exc:
             raise ApiError(422, str(exc)) from exc
         # 官方要求：写入完成且立即可检索后才返回；三个 ID 必须原样回显

@@ -26,7 +26,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import features
 from .config import RetrieverConfig
@@ -84,6 +84,10 @@ class SearchResult:
     request_id: str | None
     total: int
     results: list[Evidence] = field(default_factory=list)
+
+
+class IdempotencyConflictError(ValueError):
+    """The same idempotency key was reused for a different Add payload."""
 
 
 def _now_iso() -> str:
@@ -222,6 +226,7 @@ class RetrieverDB:
                     user_id TEXT NOT NULL,
                     session_id TEXT,
                     message_ids TEXT NOT NULL,
+                    payload_hash TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(request_id, user_id)
                 );
@@ -245,6 +250,11 @@ class RetrieverDB:
                 );
                 """
             )
+
+            # 旧数据库的无损迁移；历史记录 hash 为空，仍保持旧版幂等语义。
+            columns = {row[1] for row in con.execute("PRAGMA table_info(requests)")}
+            if "payload_hash" not in columns:
+                con.execute("ALTER TABLE requests ADD COLUMN payload_hash TEXT")
 
         self._write(_do)
 
@@ -279,14 +289,29 @@ class RetrieverDB:
                     raise ValueError("timestamp must be an integer (unix milliseconds)")
             normalized.append({"role": item.get("role") or "", "content": content, "ts_ms": ts})
 
-        return self._write(self._add_locked, request_id, user_id, session_id, normalized)
+        canonical = json.dumps(
+            {"session_id": session_id, "messages": normalized},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        payload_hash = hashlib.sha256(canonical).hexdigest()
+        return self._write(
+            self._add_locked, request_id, user_id, session_id, normalized, payload_hash
+        )
 
-    def _add_locked(self, con, request_id, user_id, session_id, normalized) -> AddResult:
+    def _add_locked(
+        self, con, request_id, user_id, session_id, normalized, payload_hash
+    ) -> AddResult:
         row = con.execute(
-            "SELECT message_ids FROM requests WHERE request_id=? AND user_id=?",
+            "SELECT message_ids, payload_hash FROM requests WHERE request_id=? AND user_id=?",
             (request_id, user_id),
         ).fetchone()
         if row is not None:  # 幂等：同 (request_id, user_id) 不重复落库
+            if row["payload_hash"] and row["payload_hash"] != payload_hash:
+                raise IdempotencyConflictError(
+                    "request_id was already used with a different session or message payload"
+                )
             return AddResult(
                 request_id=request_id,
                 user_id=user_id,
@@ -347,9 +372,10 @@ class RetrieverDB:
         new_count = old_count + len(normalized)
 
         con.execute(
-            "INSERT INTO requests(request_id,user_id,session_id,message_ids,created_at) "
-            "VALUES(?,?,?,?,?)",
-            (request_id, user_id, session_id, json.dumps(new_ids), now),
+            "INSERT INTO requests"
+            "(request_id,user_id,session_id,message_ids,payload_hash,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (request_id, user_id, session_id, json.dumps(new_ids), payload_hash, now),
         )
         con.execute(
             "INSERT INTO sessions(user_id,session_id,msg_count,last_ts_ms,seg_index,seg_start,seg_count) "
@@ -993,6 +1019,39 @@ class RetrieverDB:
                 "DELETE FROM requests; DELETE FROM sessions;"
             )
             return {"deleted_messages": n}
+
+        return self._write(_do)
+
+    def purge_stale_users(self, retention_days: int) -> dict:
+        """Delete every trace for users whose most recent Add is older than the TTL."""
+        days = int(retention_days)
+        if days <= 0:
+            return {"deleted_users": 0, "deleted_messages": 0}
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        def _do(con):
+            user_ids = [
+                row[0]
+                for row in con.execute(
+                    "SELECT user_id FROM messages GROUP BY user_id "
+                    "HAVING MAX(added_at) < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            deleted_messages = 0
+            for user_id in user_ids:
+                deleted_messages += con.execute(
+                    "SELECT COUNT(*) FROM messages WHERE user_id=?", (user_id,)
+                ).fetchone()[0]
+                con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM requests WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            return {
+                "deleted_users": len(user_ids),
+                "deleted_messages": deleted_messages,
+            }
 
         return self._write(_do)
 

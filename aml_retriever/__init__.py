@@ -11,7 +11,7 @@ from .config import RetrieverConfig, DEFAULT_FLAGS
 from .retriever import RetrieverDB, AddResult, SearchResult, Evidence
 from .api import MemoryService, ApiError
 
-__version__ = "1.1.0"
+__version__ = "2.0.0-mvp.1"
 
 __all__ = [
     "Store",

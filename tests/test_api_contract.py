@@ -168,16 +168,15 @@ class TestAddContract(ServiceCase):
         payload["messages"][0].update({"name": "alice", "tool_call_id": "t1", "extra": None})
         self.assertIs(self.service.official_add(payload)["success"], True)
 
-    def test_same_request_id_with_different_payload_is_first_write_wins(self):
-        """同 (request_id, user_id) 重复提交但正文不同：首写生效，不覆盖不追加。
-
-        这是本实现对官方未声明行为的显式选择，见 MemoryService.official_add 文档。
-        """
+    def test_same_request_id_with_different_payload_is_conflict(self):
+        """同幂等键不允许静默吞掉不同正文。"""
         first = _payload(request_id="dup-1", contents=("原始正文 Alpha",))
         self.assertIs(self.service.official_add(first)["success"], True)
 
         second = _payload(request_id="dup-1", contents=("被改写的正文 Beta", "多出来的一条"))
-        self.assertIs(self.service.official_add(second)["success"], True)
+        with self.assertRaises(ApiError) as ctx:
+            self.service.official_add(second)
+        self.assertEqual(ctx.exception.status, 409)
 
         self.assertEqual(self.service.db.count("u1"), 1, "重复 request_id 不得追加消息")
         body = self.service.official_search({"query": "Alpha", "user_id": "u1", "top_k": 10})
@@ -312,6 +311,21 @@ class TestSearchContract(ServiceCase):
         )
         body = self.service.official_search({"query": "Zeus", "user_id": "u1", "top_k": 50})
         self.assertTrue(all("秘密内容" not in item["content"] for item in body["data"]))
+
+    def test_streaming_adds_are_immediately_searchable(self):
+        """Cycle 2 Streaming: each incremental chunk is committed before Add returns."""
+        for index, fact in enumerate(("代号 Aurora", "预算 42 万", "截止日期 10 月 31 日")):
+            self.service.official_add(
+                _payload(
+                    request_id=f"stream-{index}",
+                    session_id="stream-session",
+                    contents=(fact,),
+                )
+            )
+            body = self.service.official_search(
+                {"query": fact, "user_id": "u1", "top_k": 100}
+            )
+            self.assertTrue(any(fact in item["content"] for item in body["data"]))
 
 
 class TestHttpEndToEnd(unittest.TestCase):

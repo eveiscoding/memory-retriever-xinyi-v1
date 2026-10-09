@@ -112,6 +112,13 @@ class RetrieverConfig:
     add_path: str = "/add"
     search_path: str = "/search"
     health_path: str = "/health"
+    max_inflight: int = 32
+    request_queue_size: int = 64
+    admin_enabled: bool = False
+
+    # 生命周期：按用户最后一次 Add 的时间计算。0 表示关闭自动清理。
+    retention_days: int = 30
+    cleanup_interval_seconds: int = 3600
 
     flags: dict = field(default_factory=lambda: dict(DEFAULT_FLAGS))
 
@@ -145,6 +152,10 @@ class RetrieverConfig:
             "AML_ADD_PATH": ("add_path", str),
             "AML_SEARCH_PATH": ("search_path", str),
             "AML_HEALTH_PATH": ("health_path", str),
+            "AML_MAX_INFLIGHT": ("max_inflight", int),
+            "AML_REQUEST_QUEUE_SIZE": ("request_queue_size", int),
+            "AML_RETENTION_DAYS": ("retention_days", int),
+            "AML_CLEANUP_INTERVAL_SECONDS": ("cleanup_interval_seconds", int),
         }
         for env_key, (attr, caster) in env_map.items():
             raw = os.environ.get(env_key)
@@ -154,6 +165,10 @@ class RetrieverConfig:
                 except (TypeError, ValueError):
                     pass
 
+        raw_admin = os.environ.get("AML_ADMIN_ENABLED")
+        if raw_admin is not None:
+            cfg.admin_enabled = raw_admin.strip().lower() in ("1", "true", "yes", "on")
+
         # AML_FLAG_<NAME>=0/1 覆盖单个开关
         for key, value in os.environ.items():
             if key.startswith("AML_FLAG_"):
@@ -161,6 +176,27 @@ class RetrieverConfig:
                 if name in cfg.flags:
                     cfg.flags[name] = value.strip().lower() in ("1", "true", "yes", "on")
         return cfg
+
+    def validate(self) -> "RetrieverConfig":
+        """Fail closed on unsafe or ambiguous production configuration."""
+        mode = (self.auth_mode or "none").strip().lower()
+        if mode not in {"none", "bearer", "token", "x-api-key"}:
+            raise ValueError("auth_mode must be one of: none, bearer, token, x-api-key")
+        self.auth_mode = mode
+        if mode != "none" and not self.api_key:
+            raise ValueError("AML_API_KEY is required when authentication is enabled")
+        paths = (self.add_path, self.search_path, self.health_path)
+        if any(not isinstance(path, str) or not path.startswith("/") for path in paths):
+            raise ValueError("all HTTP paths must start with '/'")
+        if len(set(paths)) != len(paths):
+            raise ValueError("add, search, and health paths must be different")
+        if int(self.top_k_max) < 100:
+            raise ValueError("top_k_max must be at least 100 for the official evaluation")
+        if int(self.max_inflight) < 1 or int(self.request_queue_size) < 1:
+            raise ValueError("HTTP concurrency limits must be positive")
+        if int(self.retention_days) < 0 or int(self.cleanup_interval_seconds) < 1:
+            raise ValueError("retention_days must be >= 0 and cleanup interval must be positive")
+        return self
 
     def merge(self, data: dict) -> "RetrieverConfig":
         out = RetrieverConfig(**{**asdict(self)})

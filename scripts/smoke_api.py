@@ -180,9 +180,9 @@ def run(base: str, api_key: str) -> bool:
     status, _ = call(base, "/add", tolerant, api_key=api_key)
     check("add 容忍未声明的额外字段", status == 200, f"HTTP {status}")
 
-    # 清理本次 smoke 产生的数据
+    # 生产默认关闭管理 API；启用时清理，关闭时由 TTL 回收随机 smoke 用户。
     status, body = call(base, "/admin/delete_user", {"user_id": user}, api_key=api_key)
-    check("清理 smoke 数据", status == 200, str(body))
+    check("管理 API 关闭或已清理 smoke 数据", status in (200, 404), f"HTTP {status}")
 
     return all(p for _, p, _ in RESULTS)
 

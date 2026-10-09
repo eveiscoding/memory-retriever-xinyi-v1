@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import hmac
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -41,11 +43,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         super().log_message(fmt, *args)
 
-    def _send_json(self, status: int, body: dict) -> None:
+    def _send_json(self, status: int, body: dict, headers: dict | None = None) -> None:
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -55,12 +59,14 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         expected = self.config.api_key or ""
         if not expected:
-            return True  # 未配置密钥时不强制（等价 none），避免误锁死接口
+            return False
         if mode == "x-api-key":
-            return self.headers.get("X-Api-Key", "") == expected
+            return hmac.compare_digest(self.headers.get("X-Api-Key", ""), expected)
         header = self.headers.get("Authorization", "")
         prefix = "Bearer " if mode == "bearer" else "Token "
-        return header.startswith(prefix) and header[len(prefix) :].strip() == expected
+        return header.startswith(prefix) and hmac.compare_digest(
+            header[len(prefix) :].strip(), expected
+        )
 
     def _read_json(self) -> dict:
         try:
@@ -84,7 +90,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == self.config.health_path:
             # Health 无需鉴权，任意 2xx 即视为正常
             self._send_json(200, self.service.health())
-        elif path == "/stats":
+        elif path == "/stats" and self.config.admin_enabled:
             if not self._authorized():
                 self._send_json(401, ApiError(401, "unauthorized").to_body())
             else:
@@ -97,21 +103,39 @@ class _Handler(BaseHTTPRequestHandler):
         started = time.time()
         path = self.path.split("?", 1)[0]
         try:
-            if path not in (self.config.add_path, self.config.search_path, "/admin/delete_user"):
+            allowed = {self.config.add_path, self.config.search_path}
+            if self.config.admin_enabled:
+                allowed.add("/admin/delete_user")
+            if path not in allowed:
+                # 正文尚未读取；关闭 keep-alive，避免代理复用带残留正文的连接。
+                self.close_connection = True
                 raise ApiError(404, f"unknown path: {path}")
             if not self._authorized():
+                self.close_connection = True
                 raise ApiError(401, "unauthorized: invalid or missing credential")
 
-            payload = self._read_json()
-            if path == self.config.add_path:
-                self._send_json(200, self.service.official_add(payload))
-            elif path == self.config.search_path:
-                self._send_json(200, self.service.official_search(payload))
-            else:
-                user_id = payload.get("user_id") if isinstance(payload, dict) else None
-                if not user_id:
-                    raise ApiError(422, "'user_id' is required")
-                self._send_json(200, self.service.delete_user(user_id))
+            if not self.server.inflight.acquire(blocking=False):  # type: ignore[attr-defined]
+                self.close_connection = True
+                self._send_json(
+                    429,
+                    ApiError(429, "server is at its concurrency limit").to_body(),
+                    {"Retry-After": "1"},
+                )
+                return
+
+            try:
+                payload = self._read_json()
+                if path == self.config.add_path:
+                    self._send_json(200, self.service.official_add(payload))
+                elif path == self.config.search_path:
+                    self._send_json(200, self.service.official_search(payload))
+                else:
+                    user_id = payload.get("user_id") if isinstance(payload, dict) else None
+                    if not user_id:
+                        raise ApiError(422, "'user_id' is required")
+                    self._send_json(200, self.service.delete_user(user_id))
+            finally:
+                self.server.inflight.release()  # type: ignore[attr-defined]
         except ApiError as exc:
             self._send_json(exc.status, exc.to_body())
         except Exception:  # 不外泄内部细节与记忆内容
@@ -132,10 +156,37 @@ class RetrieverServer(ThreadingHTTPServer):
 
     def __init__(self, config: RetrieverConfig, service: MemoryService | None = None,
                  quiet: bool = False):
-        self.config = config
+        self.config = config.validate()
         self.service = service or MemoryService(config)
         self.quiet = quiet
+        self.request_queue_size = int(config.request_queue_size)
+        self.inflight = threading.BoundedSemaphore(int(config.max_inflight))
+        self._cleanup_stop = threading.Event()
         super().__init__((config.host, config.port), _Handler)
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_loop, name="aml-retention-cleanup", daemon=True
+        )
+        self._cleanup_thread.start()
+
+    def _cleanup_loop(self) -> None:
+        if self.config.retention_days <= 0:
+            return
+        while not self._cleanup_stop.wait(self.config.cleanup_interval_seconds):
+            try:
+                report = self.service.db.purge_stale_users(self.config.retention_days)
+                if report["deleted_users"] and not self.quiet:
+                    print(
+                        f"[aml] retention cleanup users={report['deleted_users']} "
+                        f"messages={report['deleted_messages']}",
+                        flush=True,
+                    )
+            except Exception:
+                if not self.quiet:
+                    print("[aml] retention cleanup failed", flush=True)
+
+    def server_close(self) -> None:
+        self._cleanup_stop.set()
+        super().server_close()
 
 
 def serve(config: RetrieverConfig | None = None, quiet: bool = False) -> None:

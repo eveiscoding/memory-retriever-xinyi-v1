@@ -154,16 +154,16 @@ current official documentation before running a new evaluation.
 幂等键为 **(request_id, user_id)**：
 
 - 同键重复提交 → 返回 200 与相同的三个 ID，**不重复落库**。
-- 同键但 `messages` 内容不同 → **首次写入生效（first write wins）**，
-  第二次的正文既不覆盖也不追加，也不报 409。
-  理由：官方把 `request_id` 定位为一次写请求的标识，重复到达最可能是网络重试；
-  静默追加会在重试时污染记忆库并让召回指标虚高。
+- 同键但 `session_id` 或 `messages` 内容不同 → 返回 **HTTP 409**，
+  第二次的正文既不覆盖也不追加。这样既不会在重试时重复写入，也不会把调用方
+  错误复用 request ID 的新数据静默吞掉。
 - 换 `user_id` 后同 `request_id` → 各自独立落库（幂等键是二元组）。
 
 上述行为由 `tests/test_api_contract.py::TestAddContract` 中
-`test_same_request_id_with_different_payload_is_first_write_wins` 与
+`test_same_request_id_with_different_payload_is_conflict` 与
 `test_same_request_id_different_user_is_not_idempotent` 锁定。
-若官方后续澄清应当以最后一次为准，只需改 `retriever._add_locked` 的分支，契约层无需变动。
+历史数据库里没有 payload hash 的旧幂等记录保持向后兼容；新记录使用规范化 JSON 的
+SHA-256 做冲突检测。
 
 ## 6. 官方披露的运行参数（GitHub README）
 

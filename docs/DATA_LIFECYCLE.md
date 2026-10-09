@@ -19,7 +19,7 @@
 | 原始消息 | SQLite `messages` 表 | 全量保留，是检索返回的证据本体 |
 | 聚合视图 | SQLite `views` 表 | 滑窗 / 会话片段，含回指的 `source_ids` |
 | 检索索引 | SQLite `fts` 虚表 | 分词后的 token |
-| 幂等记录 | SQLite `requests` 表 | `(request_id, user_id)` → message_ids |
+| 幂等记录 | SQLite `requests` 表 | `(request_id, user_id)` → message_ids + payload hash |
 | 会话游标 | SQLite `sessions` 表 | 增量构窗用的边界状态 |
 
 库文件路径由 `AML_DB_PATH` / `--db` / 配置文件决定，默认 `:memory:`（进程退出即消失）。
@@ -45,7 +45,7 @@
 python3 -m aml_retriever.cli delete-user --db ./aml.db --user "eval:run_abc:conv-0"
 ```
 
-或走 HTTP：
+或走 HTTP（管理接口生产默认关闭，需显式设置 `AML_ADMIN_ENABLED=1`）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/admin/delete_user \
@@ -82,6 +82,7 @@ rm -f ./aml.db ./aml.db-wal ./aml.db-shm
 - 只能用于完成当前评测任务；**禁止**用于训练、微调、产品分析、数据集重建或对外传播；
 - 只向必要人员开放；避免记录不必要的请求正文（本系统默认已不记录）；
 - 任务完成后 **30 天内删除**，延长保留需事先书面同意；
+- 生产配置默认 `AML_RETENTION_DAYS=30`，后台按用户最后一次 Add 时间清理全部痕迹；
 - 删除时使用上面第 4 节的命令，并连同 WAL 副本一并销毁；
 - 禁止跨 `user_id` 返回记忆；`session_id` 只用于组织来源会话，不作为检索筛选条件。
 

@@ -42,6 +42,11 @@
   "add_path": "/add",
   "search_path": "/search",
   "health_path": "/health",
+  "max_inflight": 32,
+  "request_queue_size": 64,
+  "admin_enabled": false,
+  "retention_days": 30,
+  "cleanup_interval_seconds": 3600,
 
   "_comment_flags": "检索增强开关，每项可独立关闭做消融。v1.1 默认启用 supersession+update_guard 的受保护组合；preference_role_boost、temporal_intent 与 vector 仍默认关闭。",
   "flags": {

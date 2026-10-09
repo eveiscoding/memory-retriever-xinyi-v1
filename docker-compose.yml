@@ -1,0 +1,35 @@
+services:
+  memory-api:
+    build:
+      context: .
+    image: flowgrid-aml-retriever:cycle2-mvp
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      AML_DB_PATH: /data/aml.db
+      AML_HOST: 0.0.0.0
+      AML_PORT: "8080"
+      AML_AUTH_MODE: bearer
+      AML_API_KEY: ${AML_API_KEY:?set AML_API_KEY in .env}
+      AML_INCLUDE_PROVENANCE: "0"
+      AML_ADMIN_ENABLED: "0"
+      AML_MAX_INFLIGHT: "32"
+      AML_REQUEST_QUEUE_SIZE: "64"
+      AML_RETENTION_DAYS: "30"
+      AML_CLEANUP_INTERVAL_SECONDS: "3600"
+    volumes:
+      - ./data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 3g
+    cpus: 1.8
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

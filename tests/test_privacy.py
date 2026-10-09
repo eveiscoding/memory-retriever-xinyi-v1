@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from contextlib import redirect_stdout
 
 from aml_retriever.api import MemoryService
@@ -112,6 +113,20 @@ class TestDeleteLifecycle(unittest.TestCase):
         self._seed("b")
         self.service.db.purge_all()
         self.assertEqual(self.service.db.count(), 0)
+
+    def test_retention_purges_only_stale_users(self):
+        self._seed("stale")
+        self._seed("fresh")
+        old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+        self.service.db._write(
+            lambda con: con.execute(
+                "UPDATE messages SET added_at=? WHERE user_id=?", (old, "stale")
+            )
+        )
+        report = self.service.db.purge_stale_users(30)
+        self.assertEqual(report["deleted_users"], 1)
+        self.assertEqual(self.service.db.count("stale"), 0)
+        self.assertGreater(self.service.db.count("fresh"), 0)
 
     def test_health_leaks_nothing(self):
         self._seed("target")
