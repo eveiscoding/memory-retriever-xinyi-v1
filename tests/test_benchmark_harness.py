@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 
 from benchmark.adapters.locomo import load_locomo
+from benchmark.adapters.longmemeval import load_longmemeval
 from benchmark.chunking import adapter_word_count, chunk_messages
 from benchmark.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
+from benchmark.json_stream import iter_json_array
 from benchmark.report import render_markdown
 from benchmark.runner import run_cases
 from benchmark.schema import BenchmarkCase, BenchmarkMessage, BenchmarkProbe, BenchmarkSession
@@ -28,6 +30,13 @@ class FakeClient:
 
 
 class BenchmarkHarnessTest(unittest.TestCase):
+    def test_json_array_streamer_handles_small_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.json"
+            path.write_text('[{"text":"alpha"}, {"text":"中文"}]', encoding="utf-8")
+            rows = list(iter_json_array(path, chunk_size=3))
+        self.assertEqual(["alpha", "中文"], [row["text"] for row in rows])
+
     def test_chunking_honors_message_and_word_limits(self):
         messages = tuple(BenchmarkMessage(str(i), "user", "one two", i) for i in range(5))
         self.assertEqual([2, 2, 1], [len(chunk) for chunk in chunk_messages(
@@ -81,6 +90,28 @@ class BenchmarkHarnessTest(unittest.TestCase):
             cases = load_locomo(path)
         self.assertEqual("Alice: I like tea.", cases[0].probes[0].gold_evidence[0])
         self.assertEqual("user", cases[0].sessions[0].messages[0].role)
+
+    def test_longmemeval_adapter_streams_and_marks_answer_turns(self):
+        fixture = [{
+            "question_id": "q1",
+            "question_type": "knowledge-update",
+            "question": "What is the latest status?",
+            "question_date": "2024/01/03 (Wed) 12:00",
+            "haystack_session_ids": ["s1", "s2"],
+            "haystack_dates": ["2024/01/01 (Mon) 12:00", "2024/01/02 (Tue) 12:00"],
+            "haystack_sessions": [
+                [{"role": "user", "content": "The old status was red."}],
+                [{"role": "user", "content": "The status is now green.", "has_answer": True}],
+            ],
+            "answer_session_ids": ["s2"],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "longmem.json"
+            path.write_text(json.dumps(fixture), encoding="utf-8")
+            cases = load_longmemeval(path)
+        self.assertEqual(1, len(cases))
+        self.assertEqual(("The status is now green.",), cases[0].probes[0].gold_evidence)
+        self.assertFalse(cases[0].metadata["session_fallback"])
 
 
 if __name__ == "__main__":

@@ -33,6 +33,26 @@ python3 scripts/run_http_benchmark.py \
 The data directory and generated reports are git-ignored. LoCoMo remains under
 its upstream terms and attribution; this repository does not redistribute it.
 
+## LongMemEval-S
+
+The cleaned S release is roughly 265 MB. The adapter reads its top-level JSON
+array incrementally, but every selected question still contains a large private
+haystack and is indexed under an isolated user ID. Start with 20 questions:
+
+```bash
+python3 scripts/fetch_benchmark_data.py longmemeval-s
+python3 scripts/run_http_benchmark.py \
+  --dataset longmemeval-s \
+  --data-path benchmark_data/longmemeval_s_cleaned.json \
+  --base-url http://127.0.0.1:8080 \
+  --max-probes 20
+```
+
+The adapter uses turn-level `has_answer` annotations when present. Compatible
+exports containing only `answer_session_ids` fall back to one stable message
+from the annotated session and record that fact in case metadata; those fallback
+scores must not be mixed silently with turn-annotated results.
+
 ## Contract alignment and limits
 
 - Each run uses fresh `user_id` values to avoid cross-run contamination.
