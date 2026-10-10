@@ -3,28 +3,40 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
+from typing import Union
+
+GoldEvidence = Sequence[Union[str, Sequence[str]]]
 
 
 def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
-def covered_gold(results: list[dict], gold: tuple[str, ...], k: int) -> set[int]:
-    normalized_gold = [normalize(item) for item in gold]
+def _groups(gold: GoldEvidence) -> list[tuple[str, ...]]:
+    return [
+        (normalize(item),) if isinstance(item, str)
+        else tuple(normalize(marker) for marker in item if marker)
+        for item in gold
+    ]
+
+
+def covered_gold(results: list[dict], gold: GoldEvidence, k: int) -> set[int]:
+    normalized_gold = _groups(gold)
     covered: set[int] = set()
     for result in results[:k]:
         content = normalize(str(result.get("content", "")))
-        for index, marker in enumerate(normalized_gold):
-            if marker and marker in content:
+        for index, alternatives in enumerate(normalized_gold):
+            if any(marker and marker in content for marker in alternatives):
                 covered.add(index)
     return covered
 
 
-def recall_at_k(results: list[dict], gold: tuple[str, ...], k: int) -> float:
+def recall_at_k(results: list[dict], gold: GoldEvidence, k: int) -> float:
     return len(covered_gold(results, gold, k)) / len(gold) if gold else math.nan
 
 
-def reciprocal_rank(results: list[dict], gold: tuple[str, ...]) -> float:
+def reciprocal_rank(results: list[dict], gold: GoldEvidence) -> float:
     if not gold:
         return math.nan
     for rank in range(1, len(results) + 1):
@@ -33,11 +45,11 @@ def reciprocal_rank(results: list[dict], gold: tuple[str, ...]) -> float:
     return 0.0
 
 
-def forbidden_at_k(results: list[dict], forbidden: tuple[str, ...], k: int) -> float:
+def forbidden_at_k(results: list[dict], forbidden: GoldEvidence, k: int) -> float:
     return len(covered_gold(results, forbidden, k)) / len(forbidden) if forbidden else math.nan
 
 
-def ndcg_at_k(results: list[dict], gold: tuple[str, ...], k: int) -> float:
+def ndcg_at_k(results: list[dict], gold: GoldEvidence, k: int) -> float:
     if not gold:
         return math.nan
     # One aggregate memory may contain several gold messages. Count only newly

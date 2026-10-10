@@ -58,21 +58,22 @@ def run_cases(cases: list[BenchmarkCase], client, *, top_k: int = 100,
                 results = client.search(payload)
                 elapsed = (time.perf_counter() - started) * 1000
                 search_latencies.append(elapsed)
+                gold = probe.effective_gold
                 rows.append({
                     "case_id": case.case_id,
                     "probe_id": probe.probe_id,
                     "dataset": case.dataset,
                     "capability": probe.capability,
-                    "gold_count": len(probe.gold_evidence),
+                    "gold_count": len(gold),
                     "returned": len(results),
-                    "recall@5": M.recall_at_k(results, probe.gold_evidence, 5),
-                    "recall@20": M.recall_at_k(results, probe.gold_evidence, 20),
-                    "recall@100": M.recall_at_k(results, probe.gold_evidence, 100),
-                    "mrr": M.reciprocal_rank(results, probe.gold_evidence),
-                    "ndcg@20": M.ndcg_at_k(results, probe.gold_evidence, 20),
+                    "recall@5": M.recall_at_k(results, gold, 5),
+                    "recall@20": M.recall_at_k(results, gold, 20),
+                    "recall@100": M.recall_at_k(results, gold, 100),
+                    "mrr": M.reciprocal_rank(results, gold),
+                    "ndcg@20": M.ndcg_at_k(results, gold, 20),
                     "complete@20": float(
-                        len(M.covered_gold(results, probe.gold_evidence, 20)) == len(probe.gold_evidence)
-                    ) if probe.gold_evidence else math.nan,
+                        len(M.covered_gold(results, gold, 20)) == len(gold)
+                    ) if gold else math.nan,
                     "forbidden@10": M.forbidden_at_k(results, probe.forbidden_evidence, 10),
                     "latency_ms": elapsed,
                     "result_ids": [str(item["id"]) for item in results],

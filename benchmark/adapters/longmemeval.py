@@ -33,7 +33,7 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
         answer_session_ids = {str(value) for value in item.get("answer_session_ids") or []}
         sessions: list[BenchmarkSession] = []
         marked_evidence: list[str] = []
-        answer_session_fallbacks: list[str] = []
+        answer_session_fallbacks: dict[str, list[str]] = {}
 
         for session_index, raw_messages in enumerate(raw_sessions):
             source_session_id = str(
@@ -53,7 +53,7 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
                     continue
                 role = str(raw_message.get("role", "user")).strip() or "user"
                 message = BenchmarkMessage(
-                    message_id=f"{question_id}:{source_session_id}:{message_index}",
+                    message_id=f"{question_id}:{source_session_id}:{session_index}:{message_index}",
                     role=role,
                     content=content,
                     timestamp=base_timestamp + message_index * 1000,
@@ -62,20 +62,28 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
                 if raw_message.get("has_answer") is True:
                     marked_evidence.append(content)
                 if source_session_id in answer_session_ids:
-                    answer_session_fallbacks.append(content)
+                    answer_session_fallbacks.setdefault(source_session_id, []).append(content)
             if messages:
-                sessions.append(BenchmarkSession(source_session_id, tuple(messages)))
+                sessions.append(BenchmarkSession(
+                    f"{source_session_id}:{session_index}", tuple(messages)
+                ))
 
         evidence = tuple(dict.fromkeys(marked_evidence))
         used_session_fallback = False
+        evidence_groups: tuple[tuple[str, ...], ...] = ()
         if not evidence and answer_session_fallbacks:
-            evidence = (answer_session_fallbacks[0],)
+            evidence_groups = tuple(
+                tuple(dict.fromkeys(markers))
+                for session_id, markers in answer_session_fallbacks.items()
+                if session_id in answer_session_ids and markers
+            )
             used_session_fallback = True
         probe = BenchmarkProbe(
             probe_id=question_id,
             query=str(item.get("question", "")).strip(),
             capability=str(item.get("question_type", "unknown")),
             gold_evidence=evidence,
+            gold_evidence_groups=evidence_groups,
         )
         if sessions and probe.query:
             case = BenchmarkCase(
@@ -85,7 +93,7 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
                 probes=(probe,),
                 metadata={
                     "question_date": item.get("question_date"),
-                    "has_answer": bool(evidence),
+                    "has_answer": bool(evidence or evidence_groups),
                     "session_fallback": used_session_fallback,
                 },
             )

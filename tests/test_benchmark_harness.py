@@ -54,6 +54,11 @@ class BenchmarkHarnessTest(unittest.TestCase):
         self.assertEqual(0.5, reciprocal_rank(results, gold))
         self.assertEqual(0.6309297535714575, ndcg_at_k(results, gold, 2))
 
+    def test_metrics_support_alternative_markers_for_session_gold(self):
+        results = [{"content": "assistant answer from the gold session"}]
+        gold_groups = (("user question", "assistant answer"),)
+        self.assertEqual(1.0, recall_at_k(results, gold_groups, 1))
+
     def test_runner_uses_http_shaped_add_and_search(self):
         case = BenchmarkCase(
             "case", "fixture",
@@ -112,6 +117,31 @@ class BenchmarkHarnessTest(unittest.TestCase):
         self.assertEqual(1, len(cases))
         self.assertEqual(("The status is now green.",), cases[0].probes[0].gold_evidence)
         self.assertFalse(cases[0].metadata["session_fallback"])
+
+    def test_longmemeval_adapter_handles_duplicate_source_session_ids(self):
+        fixture = [{
+            "question_id": "q-duplicate",
+            "question_type": "single-session-user",
+            "question": "What is the answer?",
+            "haystack_session_ids": ["same", "same", "answer"],
+            "haystack_dates": ["", "", ""],
+            "haystack_sessions": [
+                [{"role": "user", "content": "noise one"}],
+                [{"role": "user", "content": "noise two"}],
+                [{"role": "user", "content": "question"},
+                 {"role": "assistant", "content": "answer text"}],
+            ],
+            "answer_session_ids": ["answer"],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "longmem-duplicates.json"
+            path.write_text(json.dumps(fixture), encoding="utf-8")
+            cases = load_longmemeval(path)
+        self.assertEqual(3, len({session.session_id for session in cases[0].sessions}))
+        self.assertEqual(
+            (("question", "answer text"),),
+            cases[0].probes[0].gold_evidence_groups,
+        )
 
 
 if __name__ == "__main__":

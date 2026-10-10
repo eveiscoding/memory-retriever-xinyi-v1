@@ -27,9 +27,16 @@ class BenchmarkProbe:
     query: str
     capability: str
     gold_evidence: tuple[str, ...] = ()
+    gold_evidence_groups: tuple[tuple[str, ...], ...] = ()
     forbidden_evidence: tuple[str, ...] = ()
     options: tuple[str, ...] = ()
     after_session: int | None = None
+
+    @property
+    def effective_gold(self) -> tuple[tuple[str, ...], ...]:
+        if self.gold_evidence_groups:
+            return self.gold_evidence_groups
+        return tuple((marker,) for marker in self.gold_evidence)
 
 
 @dataclass(frozen=True)
