@@ -76,7 +76,7 @@ Requirements:
 git clone https://github.com/dlxeva/flowgrid-aml-retriever.git
 cd flowgrid-aml-retriever
 
-# Environment check, 146 unit tests, CLI self-check, and 31 HTTP smoke checks
+# Environment check, unit tests, CLI self-check, and HTTP contract smoke checks
 ./scripts/run_tests.sh
 
 # Start on 127.0.0.1:8080 with ./aml.db

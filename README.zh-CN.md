@@ -67,7 +67,7 @@ HTTP wrapper 与检索引擎分层：协议变化集中在 `api.py` 和 `server.
 git clone https://github.com/dlxeva/flowgrid-aml-retriever.git
 cd flowgrid-aml-retriever
 
-# 环境检查、146 项单测、CLI 自检、31 项 HTTP smoke
+# 环境检查、完整单测、CLI 自检和 HTTP 契约 smoke
 ./scripts/run_tests.sh
 
 # 默认启动在 127.0.0.1:8080，数据库为 ./aml.db

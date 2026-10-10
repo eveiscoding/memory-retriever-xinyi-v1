@@ -34,6 +34,7 @@ WORKDIR /app
 
 # Copy runtime and verification files only.
 COPY aml_retriever/ /app/aml_retriever/
+COPY benchmark/ /app/benchmark/
 COPY scripts/ /app/scripts/
 COPY tests/ /app/tests/
 COPY config.example.json /app/config.example.json

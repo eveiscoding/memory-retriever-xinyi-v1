@@ -20,7 +20,8 @@ def _date_timestamp(value: object, fallback: int) -> int:
 
 
 def load_longmemeval(path: str | Path, *, limit: int | None = None,
-                     per_capability: int | None = None) -> list[BenchmarkCase]:
+                     per_capability: int | None = None,
+                     dataset: str = "longmemeval-s") -> list[BenchmarkCase]:
     if per_capability is not None and per_capability < 1:
         raise ValueError("per_capability must be positive")
     cases: list[BenchmarkCase] = []
@@ -95,7 +96,7 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None,
         if sessions and probe.query:
             case = BenchmarkCase(
                 case_id=question_id,
-                dataset="longmemeval-s",
+                dataset=dataset,
                 sessions=tuple(sessions),
                 probes=(probe,),
                 metadata={

@@ -10,7 +10,17 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmark.adapters import load_locomo, load_longmemeval, load_synthetic
+from benchmark.adapters import (
+    load_beam,
+    load_clbench,
+    load_halumem,
+    load_locomo,
+    load_locomo_refined,
+    load_longmemeval,
+    load_personamem,
+    load_scriptmem,
+    load_synthetic,
+)
 from benchmark.http_client import AMLClient
 from benchmark.report import render_markdown
 from benchmark.runner import run_cases
@@ -20,9 +30,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--api-key-env", default="AML_API_KEY")
-    parser.add_argument("--dataset", choices=("synthetic", "locomo", "longmemeval-s"),
-                        default="synthetic")
+    parser.add_argument("--dataset", choices=(
+        "synthetic", "locomo", "locomo-refined", "longmemeval-s", "beam",
+        "clbench", "halumem", "personamem-v2", "scriptmem",
+    ), default="synthetic")
     parser.add_argument("--data-path", default="benchmark_data/locomo10.json")
+    parser.add_argument("--questions-path",
+                        help="LoCoMo Refined public questions JSONL")
+    parser.add_argument("--chat-history-dir",
+                        help="PersonaMem directory containing downloaded chat histories")
     parser.add_argument("--synthetic-scale", choices=("smoke", "small", "medium", "large"),
                         default="small")
     parser.add_argument("--synthetic-difficulty", choices=("plain", "paraphrase", "mixed"),
@@ -38,12 +54,30 @@ def main() -> None:
         cases = load_synthetic(scale=args.synthetic_scale, difficulty=args.synthetic_difficulty)
     elif args.dataset == "locomo":
         cases = load_locomo(args.data_path)
-    else:
+    elif args.dataset == "longmemeval-s":
         cases = load_longmemeval(
             args.data_path,
             limit=None if args.longmemeval_per_capability else args.max_probes,
             per_capability=args.longmemeval_per_capability,
         )
+    elif args.dataset == "beam":
+        cases = load_beam(args.data_path, limit=args.max_probes)
+    elif args.dataset == "clbench":
+        cases = load_clbench(args.data_path, limit=args.max_probes)
+    elif args.dataset == "halumem":
+        cases = load_halumem(args.data_path, limit=args.max_probes)
+    elif args.dataset == "locomo-refined":
+        cases = load_locomo_refined(args.data_path, questions_path=args.questions_path)
+    elif args.dataset == "personamem-v2":
+        if not args.chat_history_dir:
+            parser.error("--chat-history-dir is required for personamem-v2")
+        cases = load_personamem(
+            args.data_path, chat_history_dir=args.chat_history_dir, limit=args.max_probes,
+        )
+    else:
+        cases = load_scriptmem(args.data_path)
+    if not cases:
+        parser.error(f"{args.dataset} produced no benchmark cases; check the input paths")
     client = AMLClient(args.base_url, api_key=os.environ.get(args.api_key_env, ""))
     report = run_cases(cases, client, top_k=args.top_k, max_probes=args.max_probes,
                        run_id=args.run_id)
