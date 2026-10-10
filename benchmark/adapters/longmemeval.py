@@ -19,13 +19,20 @@ def _date_timestamp(value: object, fallback: int) -> int:
     return fallback
 
 
-def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[BenchmarkCase]:
+def load_longmemeval(path: str | Path, *, limit: int | None = None,
+                     per_capability: int | None = None) -> list[BenchmarkCase]:
+    if per_capability is not None and per_capability < 1:
+        raise ValueError("per_capability must be positive")
     cases: list[BenchmarkCase] = []
+    capability_counts: dict[str, int] = {}
     for row_index, item in enumerate(iter_json_array(path)):
         if limit is not None and len(cases) >= limit:
             break
         if not isinstance(item, dict):
             raise ValueError(f"LongMemEval row {row_index} must be an object")
+        capability = str(item.get("question_type", "unknown"))
+        if per_capability is not None and capability_counts.get(capability, 0) >= per_capability:
+            continue
         question_id = str(item.get("question_id", row_index))
         raw_sessions = item.get("haystack_sessions") or []
         session_ids = item.get("haystack_session_ids") or []
@@ -81,7 +88,7 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
         probe = BenchmarkProbe(
             probe_id=question_id,
             query=str(item.get("question", "")).strip(),
-            capability=str(item.get("question_type", "unknown")),
+            capability=capability,
             gold_evidence=evidence,
             gold_evidence_groups=evidence_groups,
         )
@@ -99,4 +106,5 @@ def load_longmemeval(path: str | Path, *, limit: int | None = None) -> list[Benc
             )
             case.validate()
             cases.append(case)
+            capability_counts[capability] = capability_counts.get(capability, 0) + 1
     return cases

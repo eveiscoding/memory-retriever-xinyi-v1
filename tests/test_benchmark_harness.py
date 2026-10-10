@@ -143,6 +143,26 @@ class BenchmarkHarnessTest(unittest.TestCase):
             cases[0].probes[0].gold_evidence_groups,
         )
 
+    def test_longmemeval_adapter_can_balance_capabilities(self):
+        fixture = []
+        for index, capability in enumerate(("fact", "fact", "temporal", "temporal")):
+            fixture.append({
+                "question_id": f"q-{index}",
+                "question_type": capability,
+                "question": "Question?",
+                "haystack_session_ids": [f"s-{index}"],
+                "haystack_dates": [""],
+                "haystack_sessions": [[{
+                    "role": "user", "content": f"answer-{index}", "has_answer": True,
+                }]],
+                "answer_session_ids": [f"s-{index}"],
+            })
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "longmem-balanced.json"
+            path.write_text(json.dumps(fixture), encoding="utf-8")
+            cases = load_longmemeval(path, per_capability=1)
+        self.assertEqual(["fact", "temporal"], [case.probes[0].capability for case in cases])
+
 
 if __name__ == "__main__":
     unittest.main()

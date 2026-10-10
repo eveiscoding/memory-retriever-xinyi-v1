@@ -45,8 +45,12 @@ python3 scripts/run_http_benchmark.py \
   --dataset longmemeval-s \
   --data-path benchmark_data/longmemeval_s_cleaned.json \
   --base-url http://127.0.0.1:8080 \
-  --max-probes 20
+  --longmemeval-per-capability 4 \
+  --max-probes 24
 ```
+
+This selects four questions from each of LongMemEval's six capabilities instead
+of taking the first rows, which are grouped by question type in the public file.
 
 The adapter uses turn-level `has_answer` annotations when present. Compatible
 exports containing only `answer_session_ids` fall back to one stable message

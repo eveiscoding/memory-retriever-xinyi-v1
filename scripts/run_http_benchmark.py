@@ -27,6 +27,7 @@ def main() -> None:
                         default="small")
     parser.add_argument("--synthetic-difficulty", choices=("plain", "paraphrase", "mixed"),
                         default="mixed")
+    parser.add_argument("--longmemeval-per-capability", type=int)
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--max-probes", type=int, default=200)
     parser.add_argument("--run-id")
@@ -38,7 +39,11 @@ def main() -> None:
     elif args.dataset == "locomo":
         cases = load_locomo(args.data_path)
     else:
-        cases = load_longmemeval(args.data_path, limit=args.max_probes)
+        cases = load_longmemeval(
+            args.data_path,
+            limit=None if args.longmemeval_per_capability else args.max_probes,
+            per_capability=args.longmemeval_per_capability,
+        )
     client = AMLClient(args.base_url, api_key=os.environ.get(args.api_key_env, ""))
     report = run_cases(cases, client, top_k=args.top_k, max_probes=args.max_probes,
                        run_id=args.run_id)
