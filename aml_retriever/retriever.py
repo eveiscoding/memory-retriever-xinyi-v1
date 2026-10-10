@@ -704,16 +704,21 @@ class RetrieverDB:
 
         if (
             self.flags.get("preference_role_boost", False)
-            and features.has_preference_intent(query)
+            and features.has_personalization_intent(query)
         ):
             weight = float(getattr(self.config, "preference_role_weight", 14.0))
             for rec in records:
                 if (
                     rec["view"] == "message"
                     and str(rec.get("role") or "").lower() == "user"
-                    and features.has_direct_preference_statement(rec.get("content") or "")
+                    and features.has_direct_profile_statement(rec.get("content") or "")
                 ):
                     rec["score"] += weight
+                    if "direct_user_profile" not in rec["flags"]:
+                        rec["flags"].append("direct_user_profile")
+                    # 保留已有显式偏好标记，避免改变下游解释字段的语义。
+                    if not features.has_direct_preference_statement(rec.get("content") or ""):
+                        continue
                     if "direct_user_preference" not in rec["flags"]:
                         rec["flags"].append("direct_user_preference")
 

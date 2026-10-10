@@ -197,8 +197,10 @@ class TestTemporalRanking(EngineCase):
 
     def test_temporal_intent_detection(self):
         from aml_retriever.features import (
+            has_direct_profile_statement,
             has_direct_preference_statement,
             has_date_value_intent,
+            has_personalization_intent,
             has_preference_intent,
             has_numeric_value_intent,
             has_temporal_intent,
@@ -214,9 +216,14 @@ class TestTemporalRanking(EngineCase):
         self.assertFalse(has_update_cue("预算说明已经整理进手册。"))
         self.assertFalse(has_update_cue("旧的预算说明已经归档。"))
         self.assertTrue(has_preference_intent("我做抽检时偏好什么工具？"))
+        self.assertTrue(has_personalization_intent("Can you recommend resources for me?"))
+        self.assertTrue(has_personalization_intent("请推荐一些适合我的酒店。"))
         self.assertTrue(has_direct_preference_statement("我更喜欢用潮汐板做样本抽检。"))
         self.assertTrue(has_direct_preference_statement("My go-to editor is Palewind."))
         self.assertFalse(has_direct_preference_statement("林岚更喜欢潮汐板。"))
+        self.assertTrue(has_direct_profile_statement("I'm working in medical imaging."))
+        self.assertTrue(has_direct_profile_statement("My current camera is a Sony A7R IV."))
+        self.assertFalse(has_direct_profile_statement("Her current camera is a Sony A7R IV."))
         self.assertTrue(has_numeric_value_intent("当前预算是多少？"))
         self.assertTrue(has_numeric_value_intent("What is the current version?"))
         self.assertFalse(has_numeric_value_intent("猎户座现在由谁负责？"))
@@ -277,9 +284,34 @@ class TestTemporalRanking(EngineCase):
             ])
             results = db.search(user_id="u1", query="我做样本抽检时更喜欢用什么工具？", top_k=20)
             by_content = {e.content: e.evidence_flags for e in results.results if e.view == "message"}
+            self.assertIn("direct_user_profile", by_content["我更喜欢用潮汐板做样本抽检。"])
             self.assertIn("direct_user_preference", by_content["我更喜欢用潮汐板做样本抽检。"])
             self.assertNotIn("direct_user_preference", by_content["你也许会喜欢用轴心面板做样本抽检。"])
             self.assertNotIn("direct_user_preference", by_content["林岚更喜欢用 Grellet 做样本抽检。"])
+        finally:
+            db.close()
+
+    def test_personalized_recommendation_boost_marks_implicit_profile(self):
+        cfg = RetrieverConfig(db_path=":memory:").with_flags(
+            views=False,
+            rrf=False,
+            dedup=False,
+            preference_role_boost=True,
+        )
+        db = RetrieverDB(cfg)
+        try:
+            db.add(request_id="profile", user_id="u1", session_id="s1", messages=[
+                {"role": "user", "content": "My current camera is a Sony A7R IV.", "timestamp": 1_600_000_000_000},
+                {"role": "assistant", "content": "Her current camera is a Sony A7R IV.", "timestamp": 1_600_000_060_000},
+            ])
+            results = db.search(
+                user_id="u1",
+                query="Can you suggest accessories that complement my current setup?",
+                top_k=20,
+            )
+            by_content = {e.content: e.evidence_flags for e in results.results if e.view == "message"}
+            self.assertIn("direct_user_profile", by_content["My current camera is a Sony A7R IV."])
+            self.assertNotIn("direct_user_profile", by_content["Her current camera is a Sony A7R IV."])
         finally:
             db.close()
 

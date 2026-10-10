@@ -63,6 +63,12 @@ _PREFERENCE_EN = (
     "prefer", "preference", "favorite", "favourite", "go-to", "usually use",
     "tend to use", "like to use",
 )
+_PERSONALIZATION_CN = (
+    "推荐", "建议", "适合我", "适合我们", "为我挑", "帮我选",
+)
+_PERSONALIZATION_EN = (
+    "recommend", "suggest", "for me", "suit me", "matches my", "complement my",
+)
 _NUMERIC_INTENT_CN = (
     "多少", "几个", "几号", "几点", "金额", "预算", "价格", "费用", "数量",
     "编号", "号码", "版本", "余额", "额度", "比例", "百分比",
@@ -84,6 +90,11 @@ _DIRECT_PREFERENCE_EN_RE = re.compile(
     r"\b(?:i|we)\s+(?:(?:really|usually|generally)\s+)?"
     r"(?:prefer|like|favor|favour|use|tend\s+to\s+use)\b"
     r"|\b(?:my|our)\s+(?:favorite|favourite|preferred|go-to)\b",
+    re.IGNORECASE,
+)
+_DIRECT_PROFILE_CN_RE = re.compile(r"(?:我|我的|本人|我们|我们的)")
+_DIRECT_PROFILE_EN_RE = re.compile(
+    r"\b(?:i|i'm|i’ve|i've|i’d|i'd|my|mine|we|we're|we’ve|we've|our|ours)\b",
     re.IGNORECASE,
 )
 
@@ -125,6 +136,29 @@ def has_direct_preference_statement(text: str) -> bool:
     return bool(
         _DIRECT_PREFERENCE_CN_RE.search(text)
         or _DIRECT_PREFERENCE_EN_RE.search(text)
+    )
+
+
+def has_personalization_intent(text: str) -> bool:
+    """判断查询是否需要依据用户偏好或画像给出个性化结果。"""
+    if has_preference_intent(text):
+        return True
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(marker in text for marker in _PERSONALIZATION_CN):
+        return True
+    return any(marker in lowered for marker in _PERSONALIZATION_EN)
+
+
+def has_direct_profile_statement(text: str) -> bool:
+    """判断文本是否包含第一人称画像信息，而非对第三人的转述。"""
+    if not text:
+        return False
+    return bool(
+        has_direct_preference_statement(text)
+        or _DIRECT_PROFILE_CN_RE.search(text)
+        or _DIRECT_PROFILE_EN_RE.search(text)
     )
 
 
@@ -248,6 +282,8 @@ __all__ = [
     "has_update_cue",
     "has_preference_intent",
     "has_direct_preference_statement",
+    "has_personalization_intent",
+    "has_direct_profile_statement",
     "has_numeric_value_intent",
     "has_date_value_intent",
 ]
