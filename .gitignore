@@ -8,6 +8,8 @@ data/
 .venv/
 venv/
 eval_out/
+benchmark_data/
+benchmark_reports/
 
 # Local/editor state
 .idea/
