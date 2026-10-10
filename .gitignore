@@ -10,6 +10,7 @@ venv/
 eval_out/
 benchmark_data/
 benchmark_reports/
+docs/PROJECT_STATUS_*.md
 
 # Local/editor state
 .idea/
