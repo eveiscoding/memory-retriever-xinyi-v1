@@ -11,6 +11,13 @@ system: synchronous `Add` and user-isolated `Search`. It stores every original
 message, builds traceable retrieval views, and returns ranked source evidence.
 It does not generate final answers.
 
+Cross-branch HTTP benchmarks are maintained separately in the private
+[memory-retriever-xinyi-benchmarks](https://github.com/eveiscoding/memory-retriever-xinyi-benchmarks)
+repository. Keep its code and datasets fixed when comparing core branches.
+See [benchmark migration](docs/BENCHMARK.md). Engine unit tests and legacy
+implementation-specific ablations remain here; they do not replace the
+independent HTTP benchmark suite.
+
 ## Leaderboard result
 
 | Track | Entry | Rank | Score | Evaluated version |
