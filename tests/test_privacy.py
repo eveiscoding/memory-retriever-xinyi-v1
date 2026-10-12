@@ -8,6 +8,7 @@ import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from aml_retriever.api import MemoryService
 from aml_retriever.config import RetrieverConfig
@@ -132,6 +133,11 @@ class TestDeleteLifecycle(unittest.TestCase):
         self._seed("target")
         body = self.service.health()
         self.assertEqual(set(body.keys()), {"status", "service"})
+
+    def test_health_can_attest_explicit_process_revision(self):
+        with patch.dict(os.environ, {"AML_SYSTEM_REVISION": "a" * 40}):
+            body = self.service.health()
+        self.assertEqual(body["system_revision"], "a" * 40)
 
 
 if __name__ == "__main__":

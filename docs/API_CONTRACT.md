@@ -26,6 +26,8 @@ current official documentation before running a new evaluation.
 - 支持 `Token`、`Bearer`、`X-Api-Key`；`none` 仅用于公开 smoke。
 - Health：**无需鉴权的 GET**，返回任意 2xx 即视为正常。
 - 未单独配置 Health 地址时，正式任务检查与 Add **同源的 `/health`**。
+- 隔离离线评测可设置 `AML_SYSTEM_REVISION=<完整 Git SHA>`；此时 Health 会额外
+  返回 `system_revision`，供写入前核对实际子进程。生产默认不设置该变量。
 
 ## 3. POST Add
 

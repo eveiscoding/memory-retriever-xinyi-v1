@@ -200,7 +200,13 @@ class MemoryService:
 
     def health(self) -> dict:
         # 健康检查不返回任何记忆内容
-        return {"status": "ok", "service": "aml-retriever"}
+        result = {"status": "ok", "service": "aml-retriever"}
+        # 开发/评测进程可显式携带其源码提交，供写入型套件在第一次 Add
+        # 之前核验。生产默认不设置，避免把调用方声明误当成构建证明。
+        revision = os.environ.get("AML_SYSTEM_REVISION", "").strip()
+        if revision:
+            result["system_revision"] = revision
+        return result
 
     def stats(self) -> dict:
         return self.db.stats()
