@@ -180,6 +180,49 @@ class TestTemporalRanking(EngineCase):
         self.assertTrue(contents)
         self.assertIn("黑麦司康", contents[0], "较新的那条状态未排在前面")
 
+    def test_current_numeric_state_ignores_later_documentation_and_other_fields(self):
+        self.db.add(request_id="governance", user_id="u1", session_id="s1", messages=[
+            {"role": "user", "content": "赤羽预算口径是 100 元。", "timestamp": 1_600_000_000_000},
+            {"role": "user", "content": "赤羽预算口径已更新为 200 元，旧的 100 元作废。",
+             "timestamp": 1_600_000_120_000},
+            {"role": "user", "content": "赤羽预算口径已更新进说明文档，数值保持不变。",
+             "timestamp": 1_600_000_180_000},
+            {"role": "user", "content": "赤羽工位编号是 3000。", "timestamp": 1_600_000_240_000},
+        ])
+        result = self.db.search(user_id="u1", query="赤羽目前生效的预算口径是多少？", top_k=20)
+        messages = [e for e in result.results if e.view == "message"]
+        self.assertIn("已更新为 200", messages[0].content)
+        latest = [e for e in messages if "latest_state" in e.evidence_flags]
+        self.assertEqual(len(latest), 1)
+        self.assertIn("已更新为 200", latest[0].content)
+
+    def test_historical_query_preserves_old_state_without_current_flag(self):
+        self.db.add(request_id="history", user_id="u1", session_id="s1", messages=[
+            {"role": "user", "content": "赤羽预算口径是 100 元。", "timestamp": 1_600_000_000_000},
+            {"role": "user", "content": "赤羽预算口径已更新为 200 元，旧的 100 元作废。",
+             "timestamp": 1_600_000_120_000},
+        ])
+        result = self.db.search(user_id="u1", query="赤羽预算口径原来是 100 元吗？", top_k=20)
+        messages = [e for e in result.results if e.view == "message"]
+        self.assertTrue(any("是 100 元" in e.content for e in messages))
+        self.assertTrue(all("latest_state" not in e.evidence_flags for e in messages))
+
+    def test_state_uses_event_timestamp_when_adds_arrive_out_of_order(self):
+        self.db.add(request_id="new", user_id="u1", session_id="s1", messages=[
+            {"role": "user", "content": "赤羽预算口径已更新为 200 元。",
+             "timestamp": 1_600_000_120_000},
+        ])
+        self.db.add(request_id="delayed-old", user_id="u1", session_id="s2", messages=[
+            {"role": "user", "content": "赤羽预算口径是 100 元。",
+             "timestamp": 1_600_000_000_000},
+        ])
+        messages = [e for e in self.db.search(
+            user_id="u1", query="赤羽目前生效的预算口径是多少？", top_k=20
+        ).results if e.view == "message"]
+        latest = [e for e in messages if "latest_state" in e.evidence_flags]
+        self.assertEqual(len(latest), 1)
+        self.assertIn("200 元", latest[0].content)
+
     def test_recency_weight_is_configurable(self):
         cfg = RetrieverConfig(db_path=self.path, recency_weight=0.0)
         db = RetrieverDB(cfg)

@@ -258,3 +258,27 @@ python3 scripts/run_eval.py --from-json eval_out/ablation_medium_paraphrase_mult
 跨 seed 产物为 `eval_out/ablation_<scale>_<difficulty>_multiseed{,_per_seed}.csv`
 与 `REPORT_<scale>_<difficulty>_multiseed.md`；**产物只含指标数字，不落语料原文**，
 临时索引库在 `run_ladder_seeds` 的 `finally` 里 `shutil.rmtree` 清除。
+
+## 7. 记忆治理分支：带值状态与说明性提及
+
+分支 `codex/memory-governance` 修复了 `_mark_conflicts` 将较晚的“预算说明已更新、
+数值不变”误判为最新预算值的问题。最新状态加分现在只针对查询明确询问当前数值/日期、
+且候选消息确实带值并匹配查询话题时生效；历史查询与无关字段不触发该加分。
+较新消息的事件时间优先取原始 timestamp。仍保留全部原始证据，不改变 Add 数据。
+
+对比口径：修复前 core `3d3115104080d1a8ab9e948568abeed9c0d9f458` 与本分支；
+两边均用同一 `v11` 合成数据、medium/mixed、seeds `20260806,20260807,20260808`、
+top_k=100、`L9_guarded_supersession`，每次用新临时 SQLite 重建索引。
+
+| 指标（三 seed 均值） | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| 治理噪声 MRR | 0.4826 | 0.9340 |
+| 全部有金标问题 MRR | 0.5645 | 0.7417 |
+| Recall@20 | 0.9919 | 0.9919 |
+| `knowledge_update` MRR | 0.5280 | 0.5046 |
+| 治理噪声旧值/干扰证据进入前 10 比例 | 1.0000 | 1.0000 |
+
+治理噪声 MRR 逐 seed：修复前均为 0.4826；修复后分别为
+0.9375、0.9271、0.9375。当前证据的首位排序明显改善，但旧值仍会出现在前 10，
+`knowledge_update` 有小幅退步。这里仅量化检索证据排序，不包含固定 Answer 模型，
+无法据此推断官方 D1/D2 分数。历史证据仍可通过历史查询找回。

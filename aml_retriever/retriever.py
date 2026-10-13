@@ -723,7 +723,7 @@ class RetrieverDB:
                         rec["flags"].append("direct_user_preference")
 
         if self.flags.get("rerank", True):
-            self._mark_conflicts(records)
+            self._mark_conflicts(records, query)
         if self.flags.get("supersession", False):
             # 用「原始」时间意图判定，不受 flags["temporal_intent"] 影响：
             # 覆写检测与新近度放大是两个独立机制，前者不应被后者的开关连带关掉。
@@ -771,14 +771,31 @@ class RetrieverDB:
             dt = dt.replace(tzinfo=timezone.utc)
         return max(0.0, (now_ts - dt.timestamp()) / 86400.0)
 
-    def _mark_conflicts(self, records) -> None:
-        """疑似状态冲突：同一实体上出现不同数字/日期。只做标注与轻微偏好，绝不过滤。"""
+    def _mark_conflicts(self, records, query: str = "") -> None:
+        """只比较带实际数值的状态证据；说明性提及不能成为最新状态。"""
+        if not features.has_temporal_intent(query) or not (
+            features.has_numeric_value_intent(query) or features.has_date_value_intent(query)
+        ):
+            return
+        query_terms = set(features.query_tokens(query, self.config.max_query_tokens))
         buckets: dict[str, list[dict]] = {}
         for rec in records:
             if rec["view"] != "message":
                 continue
+            values = features.extract_numbers(rec["content"] or "")
+            values += features.extract_dates(rec["content"] or "")
+            if not values:
+                continue
             ents = features.extract_entities(rec["content"] or "")[:1]
             if not ents:
+                continue
+            subject = ents[0].lower()
+            topic_terms = {term for term in query_terms if len(term) >= 2
+                           and term not in subject and term not in {
+                               "现在", "目前", "当前", "最新", "多少", "什么", "时候",
+                               "now", "current", "latest", "how", "much", "many",
+                           }}
+            if not any(term in (rec["content"] or "").lower() for term in topic_terms):
                 continue
             buckets.setdefault(ents[0].lower(), []).append(rec)
         for group in buckets.values():
@@ -790,7 +807,7 @@ class RetrieverDB:
             }
             if len(values) < 2:
                 continue
-            newest = max(group, key=lambda r: (r.get("created_at") or "", r["id"]))
+            newest = max(group, key=lambda r: (self._epoch_of(r) or 0, r["id"]))
             for rec in group:
                 if "possible_conflict" not in rec["flags"]:
                     rec["flags"].append("possible_conflict")
