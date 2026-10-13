@@ -282,3 +282,17 @@ top_k=100、`L9_guarded_supersession`，每次用新临时 SQLite 重建索引�
 0.9375、0.9271、0.9375。当前证据的首位排序明显改善，但旧值仍会出现在前 10，
 `knowledge_update` 有小幅退步。这里仅量化检索证据排序，不包含固定 Answer 模型，
 无法据此推断官方 D1/D2 分数。历史证据仍可通过历史查询找回。
+
+独立 Benchmark 仓库在提交 `19292850c0283e537c1c6cb1ad1463f26f585d73`
+上固定相同 `regression.json`、数据种子和代码指纹，以正式 SHA run lock
+启动各自的新回环进程/临时 SQLite；首次 Add 前核对 `/health` 的 core revision。
+修复前/后 core SHA 分别为 `3d3115104080d1a8ab9e948568abeed9c0d9f458` /
+`ade0e5f2fcc629051073532a4b1a04a333a4ce85`。HTTP 合成回归结果：
+
+| 指标（small / mixed / seed 20260806） | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| 治理噪声 MRR | 0.5000 | 0.9375 |
+| 全部有金标问题 MRR | 0.5461 | 0.7264 |
+| Recall@20 | 0.9688 | 0.9792 |
+| Recall@100 | 1.0000 | 1.0000 |
+| Forbidden@10 | 0.7500 | 0.7500 |
