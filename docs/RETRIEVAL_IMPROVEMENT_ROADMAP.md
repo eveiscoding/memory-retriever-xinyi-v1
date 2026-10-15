@@ -147,3 +147,7 @@ SQLite database, a loopback-only endpoint, and the same benchmark revision for
 before/after comparison. Report improvements, regressions, unchanged metrics,
 latency, storage, and unscored rows. A phase is not promoted merely because one
 headline metric rises.
+
+Mac development runs use sampled suites. In particular, LongMemEval uses the
+six-question local sample by default; the 120-question balanced suite and any
+larger run execute only on the server after transfer and revision verification.
