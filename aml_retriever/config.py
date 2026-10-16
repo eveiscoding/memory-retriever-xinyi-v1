@@ -34,7 +34,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "dedup": True,       # 候选去重（同内容 / 完全被覆盖的聚合视图）
     "use_options": True, # Search 的 options 字段参与候选召回
     "exact_scan": False, # FTS 无命中时的兜底 LIKE 全扫（代价高，默认关闭）
-    "vector": False,     # 可选向量检索：环境无可用依赖时恒为 False
+    "vector": False,     # dense 候选通道；还需显式配置 dense_backend
     # 覆写检测（supersession）：在候选集内找「话题高度重合但更晚」的消息对，
     # 判定后者覆写前者，抬高后者、轻降前者。与 temporal_intent 的区别是
     # 它不做全局新近度放大，只在**成对冗余**成立时局部生效，因此不会误伤
@@ -68,6 +68,8 @@ class RetrieverConfig:
     top_k_max: int = 100          # 官方正式评测固定 100
     max_candidates: int = 400     # FTS 候选上限，界定单次 Search 的最坏代价
     max_query_tokens: int = 64    # 查询 token 上限，界定 FTS 查询规模
+    feature_scan_limit: int = 5000  # 独立确定性特征通道的单用户扫描上限
+    dense_max_candidates: int = 400  # dense 通道送入 RRF 的候选上限
     message_slot_ratio: float = 0.5  # top_k 中保底留给原始消息的比例
 
     # 加权 RRF 融合参数（仅在 flags["rrf"] 开启时生效）。
@@ -77,6 +79,12 @@ class RetrieverConfig:
     rrf_k: int = 60
     rrf_weight_feature: float = 1.0
     rrf_weight_lexical: float = 0.1
+    rrf_weight_dense: float = 0.1
+
+    # Dense backend。空字符串保持当前零依赖路径；hashing-v1 是显式启用的
+    # 内置确定性 smoke backend；生产模型可用 module:factory 插件提供。
+    dense_backend: str = ""
+    dense_dimension: int = 256
 
     # 相对新近度权重。把候选集内时间戳归一到 [0,1] 后加权，
     # 取代原先的绝对年龄项（语料整体偏老时绝对年龄会退化成常数）。
@@ -140,9 +148,14 @@ class RetrieverConfig:
             "AML_TOP_K_DEFAULT": ("top_k_default", int),
             "AML_TOP_K_MAX": ("top_k_max", int),
             "AML_MAX_CANDIDATES": ("max_candidates", int),
+            "AML_FEATURE_SCAN_LIMIT": ("feature_scan_limit", int),
+            "AML_DENSE_MAX_CANDIDATES": ("dense_max_candidates", int),
             "AML_RRF_K": ("rrf_k", int),
             "AML_RRF_W_FEATURE": ("rrf_weight_feature", float),
             "AML_RRF_W_LEXICAL": ("rrf_weight_lexical", float),
+            "AML_RRF_W_DENSE": ("rrf_weight_dense", float),
+            "AML_DENSE_BACKEND": ("dense_backend", str),
+            "AML_DENSE_DIMENSION": ("dense_dimension", int),
             "AML_RECENCY_W": ("recency_weight", float),
             "AML_RECENCY_W_INTENT": ("recency_weight_intent", float),
             "AML_HOST": ("host", str),
@@ -194,6 +207,10 @@ class RetrieverConfig:
             raise ValueError("top_k_max must be at least 100 for the official evaluation")
         if int(self.max_inflight) < 1 or int(self.request_queue_size) < 1:
             raise ValueError("HTTP concurrency limits must be positive")
+        if int(self.feature_scan_limit) < 1 or int(self.dense_max_candidates) < 1:
+            raise ValueError("candidate limits must be positive")
+        if int(self.dense_dimension) < 8:
+            raise ValueError("dense_dimension must be at least 8")
         if int(self.retention_days) < 0 or int(self.cleanup_interval_seconds) < 1:
             raise ValueError("retention_days must be >= 0 and cleanup interval must be positive")
         return self
@@ -224,20 +241,18 @@ class RetrieverConfig:
         return data
 
 
-def vector_backend_available() -> tuple[bool, str]:
-    """探测运行环境是否已有可用向量依赖。
+def vector_backend_available(spec: str | None = None) -> tuple[bool, str]:
+    """Check an explicitly configured backend without installing or downloading."""
+    configured = (spec if spec is not None else os.environ.get("AML_DENSE_BACKEND", "")).strip()
+    if not configured:
+        return False, "AML_DENSE_BACKEND is not configured"
+    try:
+        from .embeddings import load_embedding_backend
 
-    严格只做探测，绝不安装依赖、绝不联网下载模型。
-    返回 (available, reason)。
-    """
-    for module in ("numpy", "sentence_transformers", "faiss"):
-        try:
-            __import__(module)
-        except Exception:
-            continue
-        else:
-            return True, f"{module} importable"
-    return False, "no local vector dependency (numpy/sentence_transformers/faiss) importable"
+        backend = load_embedding_backend(configured)
+    except Exception as exc:
+        return False, f"configured backend failed to load: {type(exc).__name__}"
+    return True, f"{backend.identity} ({backend.model_hash})"
 
 
 __all__ = ["RetrieverConfig", "DEFAULT_FLAGS", "vector_backend_available"]

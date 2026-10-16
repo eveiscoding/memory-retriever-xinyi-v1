@@ -7,6 +7,20 @@ from aml_retriever.config import RetrieverConfig
 from aml_retriever.retriever import RetrieverDB
 
 
+class SemanticTestBackend:
+    identity = "test:semantic-v1"
+    model_hash = "semantic-v1-sha256"
+    dimension = 2
+
+    def embed(self, texts):
+        vectors = []
+        for text in texts:
+            lowered = (text or "").lower()
+            vectors.append([1.0, 0.0] if "semantic" in lowered or "target" in lowered
+                           else [0.0, 1.0])
+        return vectors
+
+
 class EngineCase(unittest.TestCase):
     def setUp(self):
         fd, self.path = tempfile.mkstemp(suffix=".db")
@@ -131,6 +145,82 @@ class TestDeterminism(EngineCase):
         for _ in range(3):
             again = [e.id for e in self.db.search(user_id="u1", query="机器学习", top_k=10).results]
             self.assertEqual(first, again)
+
+
+class TestHybridCandidateGeneration(unittest.TestCase):
+    def setUp(self):
+        fd, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(self.path + suffix)
+            except OSError:
+                pass
+
+    def test_unconfigured_backend_keeps_zero_dependency_path(self):
+        db = RetrieverDB(RetrieverConfig(db_path=self.path))
+        try:
+            db.add(request_id="r1", user_id="u1", session_id="s1", messages=[
+                {"role": "user", "content": "ordinary lexical evidence"},
+            ])
+            result = db.search(user_id="u1", query="lexical evidence", top_k=10)
+            self.assertTrue(result.results)
+            self.assertFalse(db.dense_enabled)
+            self.assertEqual(db.stats()["embedding_rows"], 0)
+            self.assertTrue(all("dense" not in item.channel_ranks for item in result.results))
+        finally:
+            db.close()
+
+    def test_dense_channel_recalls_lexically_unrelated_candidate(self):
+        cfg = RetrieverConfig(db_path=self.path).with_flags(views=False, vector=True)
+        db = RetrieverDB(cfg, embedding_backend=SemanticTestBackend())
+        try:
+            db.add(request_id="r1", user_id="u1", session_id="s1", messages=[
+                {"role": "user", "content": "target memory with no shared query terms"},
+                {"role": "user", "content": "completely different distractor"},
+            ])
+            result = db.search(user_id="u1", query="semantic question", top_k=10)
+            target = next(item for item in result.results if item.content.startswith("target memory"))
+            self.assertEqual(target.channel_ranks, {"dense": 1})
+            self.assertIn("channel:dense", target.evidence_flags)
+            self.assertIn('"dense": 1', target.provenance)
+        finally:
+            db.close()
+
+    def test_embeddings_persist_and_report_model_identity(self):
+        cfg = RetrieverConfig(db_path=self.path).with_flags(views=False, vector=True)
+        first = RetrieverDB(cfg, embedding_backend=SemanticTestBackend())
+        first.add(request_id="r1", user_id="u1", session_id="s1", messages=[
+            {"role": "user", "content": "target evidence"},
+        ])
+        initial = first.stats()
+        self.assertEqual(initial["embedding_rows"], 1)
+        self.assertGreater(initial["embedding_bytes"], 0)
+        self.assertEqual(initial["embedding_model_identity"], "test:semantic-v1")
+        self.assertEqual(initial["embedding_model_hash"], "semantic-v1-sha256")
+        first.close()
+
+        reopened = RetrieverDB(cfg, embedding_backend=SemanticTestBackend())
+        try:
+            self.assertEqual(reopened.stats()["embedding_rows"], 1)
+            result = reopened.search(user_id="u1", query="semantic query", top_k=10)
+            self.assertEqual(result.results[0].channel_ranks["dense"], 1)
+        finally:
+            reopened.close()
+
+    def test_user_deletion_removes_dense_rows(self):
+        cfg = RetrieverConfig(db_path=self.path).with_flags(views=False, vector=True)
+        db = RetrieverDB(cfg, embedding_backend=SemanticTestBackend())
+        try:
+            db.add(request_id="r1", user_id="u1", session_id="s1", messages=[
+                {"role": "user", "content": "target evidence"},
+            ])
+            db.delete_user("u1")
+            self.assertEqual(db.stats()["embedding_rows"], 0)
+        finally:
+            db.close()
 
 
 class TestSearchDoesNotAnswer(EngineCase):

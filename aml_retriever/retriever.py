@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import queue
 import sqlite3
+import struct
 import threading
 import time
 from contextlib import contextmanager
@@ -30,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import features
 from .config import RetrieverConfig
+from .embeddings import load_embedding_backend
 from .views import (
     affected_window_starts,
     join_content,
@@ -77,6 +80,7 @@ class Evidence:
     source_message_ids: list[str] = field(default_factory=list)
     provenance: str = ""
     evidence_flags: list[str] = field(default_factory=list)
+    channel_ranks: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -111,12 +115,23 @@ def _msg_id(user_id: str, session_id: str | None, seq: int) -> str:
 class RetrieverDB:
     """存储 + 检索引擎。线程安全：每线程独立连接，写操作串行化。"""
 
-    def __init__(self, config: RetrieverConfig | None = None, db_path: str | None = None):
+    def __init__(
+        self,
+        config: RetrieverConfig | None = None,
+        db_path: str | None = None,
+        embedding_backend=None,
+    ):
         self.config = config or RetrieverConfig()
         if db_path is not None:
             self.config.db_path = db_path
         self.db_path = self.config.db_path
         self.flags = dict(self.config.flags)
+        self.embedding_backend = embedding_backend or load_embedding_backend(
+            self.config.dense_backend, dimension=self.config.dense_dimension
+        )
+        # A model alone does not silently change retrieval; both the backend
+        # configuration and the vector ablation flag must be enabled.
+        self.dense_enabled = bool(self.embedding_backend and self.flags.get("vector", False))
 
         self._write_lock = threading.RLock()
         # 有界连接池：ThreadingHTTPServer 每请求一个线程，thread-local 连接会持续泄漏 fd，
@@ -129,6 +144,8 @@ class RetrieverDB:
             self._shared_mem_con = self._new_connection()
 
         self._init_schema()
+        if self.dense_enabled:
+            self._synchronize_embedding_index()
 
     # ------------------------------------------------------------- connection
     def _new_connection(self) -> sqlite3.Connection:
@@ -248,6 +265,25 @@ class RetrieverDB:
                     user_id UNINDEXED,
                     doc_type UNINDEXED
                 );
+
+                CREATE TABLE IF NOT EXISTS embeddings(
+                    doc_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    doc_type TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    model_hash TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    vector BLOB NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_embeddings_user_model
+                    ON embeddings(user_id, model_hash);
+
+                CREATE TABLE IF NOT EXISTS embedding_meta(
+                    model_hash TEXT PRIMARY KEY,
+                    identity TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -255,6 +291,76 @@ class RetrieverDB:
             columns = {row[1] for row in con.execute("PRAGMA table_info(requests)")}
             if "payload_hash" not in columns:
                 con.execute("ALTER TABLE requests ADD COLUMN payload_hash TEXT")
+
+        self._write(_do)
+
+    # --------------------------------------------------------------- embeddings
+    @staticmethod
+    def _pack_vector(vector) -> bytes:
+        values = [float(value) for value in vector]
+        return struct.pack(f"<{len(values)}f", *values)
+
+    @staticmethod
+    def _unpack_vector(blob: bytes, dimension: int) -> tuple[float, ...]:
+        if len(blob) != int(dimension) * 4:
+            raise ValueError("stored embedding has an invalid byte length")
+        return struct.unpack(f"<{int(dimension)}f", blob)
+
+    def _embed_doc(self, con, doc_id, user_id, doc_type, content) -> None:
+        if not self.dense_enabled:
+            return
+        backend = self.embedding_backend
+        vectors = backend.embed([content])
+        if len(vectors) != 1 or len(vectors[0]) != int(backend.dimension):
+            raise ValueError("embedding backend returned an invalid vector shape")
+        digest = hashlib.sha256((content or "").encode("utf-8")).hexdigest()
+        con.execute(
+            "INSERT OR REPLACE INTO embeddings"
+            "(doc_id,user_id,doc_type,content_hash,model_hash,dimension,vector) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                doc_id, user_id, doc_type, digest, str(backend.model_hash),
+                int(backend.dimension), self._pack_vector(vectors[0]),
+            ),
+        )
+
+    def _synchronize_embedding_index(self) -> None:
+        """Backfill or refresh the persistent dense index for the active model."""
+        backend = self.embedding_backend
+
+        def _do(con):
+            con.execute(
+                "INSERT OR REPLACE INTO embedding_meta(model_hash,identity,dimension,updated_at) "
+                "VALUES(?,?,?,?)",
+                (str(backend.model_hash), str(backend.identity), int(backend.dimension), _now_iso()),
+            )
+            rows = con.execute(
+                "SELECT id AS doc_id,user_id,'message' AS doc_type,content FROM messages "
+                "UNION ALL "
+                "SELECT view_id AS doc_id,user_id,view_type AS doc_type,content FROM views"
+            ).fetchall()
+            live_ids = {row["doc_id"] for row in rows}
+            for row in rows:
+                digest = hashlib.sha256((row["content"] or "").encode("utf-8")).hexdigest()
+                current = con.execute(
+                    "SELECT content_hash,model_hash,dimension FROM embeddings WHERE doc_id=?",
+                    (row["doc_id"],),
+                ).fetchone()
+                if current and current["content_hash"] == digest and \
+                        current["model_hash"] == str(backend.model_hash) and \
+                        int(current["dimension"]) == int(backend.dimension):
+                    continue
+                self._embed_doc(
+                    con, row["doc_id"], row["user_id"], row["doc_type"], row["content"]
+                )
+            if live_ids:
+                placeholders = ",".join("?" for _ in live_ids)
+                con.execute(
+                    f"DELETE FROM embeddings WHERE doc_id NOT IN ({placeholders})",
+                    tuple(sorted(live_ids)),
+                )
+            else:
+                con.execute("DELETE FROM embeddings")
 
         self._write(_do)
 
@@ -478,6 +584,7 @@ class RetrieverDB:
             "INSERT INTO fts(text, doc_id, user_id, doc_type) VALUES(?,?,?,?)",
             (features.index_text(content), doc_id, user_id, doc_type),
         )
+        self._embed_doc(con, doc_id, user_id, doc_type, content)
 
     # ----------------------------------------------------------------- Search
     def _match_expr(self, tokens: list[str]) -> str | None:
@@ -512,6 +619,96 @@ class RetrieverDB:
         ).fetchall()
         return [(r["doc_id"], r["doc_type"], 0.0) for r in rows]
 
+    def _feature_candidate_score(
+        self, content: str, query: str, tokens: list[str], prepared=None
+    ) -> float:
+        """Cheap deterministic recall score, independent of the FTS result set."""
+        lowered = (content or "").lower()
+        if prepared is None:
+            prepared = (
+                (query or "").lower(),
+                features.extract_dates(query),
+                features.extract_numbers(query),
+                [value.lower() for value in features.extract_entities(query)][:32],
+            )
+        query_lower, dates, numbers, entities = prepared
+        score = 0.0
+        if query_lower and len(query_lower) >= 4 and query_lower in lowered:
+            score += W_EXACT_FULL
+        if tokens:
+            score += W_COVERAGE * sum(token in lowered for token in tokens) / len(tokens)
+        score += W_DATE * sum(value in lowered for value in dates)
+        score += W_NUMBER * sum(value in lowered for value in numbers)
+        score += min(W_ENTITY * sum(value in lowered for value in entities), W_ENTITY * 5)
+        return score
+
+    def _feature_candidates(
+        self, con, user_id: str, query: str, tokens: list[str]
+    ) -> list[tuple[str, str, float]]:
+        include_views = self.flags.get("views", True)
+        limit = int(self.config.feature_scan_limit)
+        rows = con.execute(
+            "SELECT id AS doc_id,'message' AS doc_type,content FROM messages "
+            "WHERE user_id=? ORDER BY id LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        remaining = max(0, limit - len(rows))
+        if include_views and remaining:
+            rows += con.execute(
+                "SELECT view_id AS doc_id,view_type AS doc_type,content FROM views "
+                "WHERE user_id=? ORDER BY view_id LIMIT ?",
+                (user_id, remaining),
+            ).fetchall()
+        prepared = (
+            (query or "").lower(),
+            features.extract_dates(query),
+            features.extract_numbers(query),
+            [value.lower() for value in features.extract_entities(query)][:32],
+        )
+        scored = [
+            (row["doc_id"], row["doc_type"], self._feature_candidate_score(
+                row["content"], query, tokens, prepared
+            ))
+            for row in rows
+        ]
+        scored = [item for item in scored if item[2] > 0.0]
+        return sorted(scored, key=lambda item: (-item[2], item[0]))[: int(self.config.max_candidates)]
+
+    @staticmethod
+    def _cosine(left, right) -> float:
+        # Stored and query vectors may already be normalized, but computing the
+        # denominator keeps custom backends correct without imposing that rule.
+        dot = sum(a * b for a, b in zip(left, right))
+        lnorm = math.sqrt(sum(value * value for value in left))
+        rnorm = math.sqrt(sum(value * value for value in right))
+        return dot / (lnorm * rnorm) if lnorm and rnorm else 0.0
+
+    def _dense_candidates(self, con, user_id: str, query: str) -> list[tuple[str, str, float]]:
+        if not self.dense_enabled:
+            return []
+        backend = self.embedding_backend
+        vectors = backend.embed([query])
+        if len(vectors) != 1 or len(vectors[0]) != int(backend.dimension):
+            raise ValueError("embedding backend returned an invalid query vector")
+        query_vector = vectors[0]
+        rows = con.execute(
+            "SELECT doc_id,doc_type,dimension,vector FROM embeddings "
+            "WHERE user_id=? AND model_hash=? "
+            + ("" if self.flags.get("views", True) else "AND doc_type='message' "),
+            (user_id, str(backend.model_hash)),
+        ).fetchall()
+        scored: list[tuple[str, str, float]] = []
+        for row in rows:
+            try:
+                stored = self._unpack_vector(row["vector"], row["dimension"])
+            except (ValueError, struct.error):
+                continue
+            score = self._cosine(query_vector, stored)
+            scored.append((row["doc_id"], row["doc_type"], score))
+        return sorted(scored, key=lambda item: (-item[2], item[0]))[
+            : int(self.config.dense_max_candidates)
+        ]
+
     def search(
         self,
         *,
@@ -536,20 +733,53 @@ class RetrieverDB:
         tokens = features.query_tokens(recall_text, self.config.max_query_tokens)
 
         with self.connection() as con:
-            raw_candidates = self._fts_candidates(con, user_id, tokens)
-            if not raw_candidates and self.flags.get("exact_scan", False):
-                raw_candidates = self._like_fallback(con, user_id, query)
+            fts_candidates = self._fts_candidates(con, user_id, tokens)
+            if not fts_candidates and self.flags.get("exact_scan", False):
+                fts_candidates = self._like_fallback(con, user_id, query)
+            feature_candidates = self._feature_candidates(con, user_id, recall_text, tokens)
+            dense_candidates = self._dense_candidates(con, user_id, recall_text)
+            channel_candidates = {
+                "fts": fts_candidates,
+                "feature": feature_candidates,
+                "dense": dense_candidates,
+            }
+            candidate_types: dict[str, str] = {}
+            for candidates in channel_candidates.values():
+                for doc_id, doc_type, _score in candidates:
+                    candidate_types.setdefault(doc_id, doc_type)
+            raw_candidates = [
+                (doc_id, doc_type, 0.0)
+                for doc_id, doc_type in sorted(candidate_types.items())
+            ]
             if not raw_candidates:
                 return SearchResult(request_id=request_id, total=0, results=[])
             records = self._load_records(con, user_id, raw_candidates)
 
-        fts_order = [doc_id for doc_id, _t, _r in raw_candidates]
-        rank_map = {doc_id: rank for doc_id, _t, rank in raw_candidates}
+        channel_orders = {
+            name: [doc_id for doc_id, _type, _score in candidates]
+            for name, candidates in channel_candidates.items()
+            if candidates
+        }
+        rank_map = {doc_id: rank for doc_id, _t, rank in fts_candidates}
         if not records:
             return SearchResult(request_id=request_id, total=0, results=[])
 
         scored = self._score(records, query, tokens, rank_map)
-        ordered = self._fuse_and_order(scored, fts_order)
+        # Candidate membership is independent; the deterministic channel's
+        # internal rank uses the complete deterministic scorer so existing
+        # temporal/update protections remain effective.
+        feature_ids = {doc_id for doc_id, _type, _score in feature_candidates}
+        if feature_ids:
+            channel_orders["feature"] = [
+                record["id"]
+                for record in sorted(
+                    (record for record in scored if record["id"] in feature_ids),
+                    key=lambda item: (
+                        -item["score"], len(item["content"] or ""), item["id"]
+                    ),
+                )
+            ]
+        ordered = self._fuse_and_order(scored, channel_orders)
         if self.flags.get("dedup", True):
             ordered = self._dedup(ordered)
         final = self._apply_slot_guarantee(ordered, limit)
@@ -563,8 +793,12 @@ class RetrieverDB:
                 created_at=r["created_at"] or "",
                 score=round(float(r["score"]), 6),
                 source_message_ids=r["source_ids"],
-                provenance=f"{r['view']}:{r['id']}<-[{','.join(r['source_ids'])}]",
+                provenance=(
+                    f"{r['view']}:{r['id']}<-[{','.join(r['source_ids'])}]"
+                    f";channels={json.dumps(r['channel_ranks'], sort_keys=True)}"
+                ),
                 evidence_flags=r["flags"],
+                channel_ranks=r["channel_ranks"],
             )
             for r in final
         ]
@@ -949,23 +1183,33 @@ class RetrieverDB:
                 if "superseded" not in rec["flags"]:
                     rec["flags"].append("superseded")
 
-    def _fuse_and_order(self, records, fts_order) -> list[dict]:
-        feat_order = [
-            r["id"]
-            for r in sorted(records, key=lambda x: (-x["score"], len(x["content"] or ""), x["id"]))
-        ]
+    def _fuse_and_order(self, records, channel_orders) -> list[dict]:
+        ranks_by_id: dict[str, dict[str, int]] = {}
+        for channel, order in channel_orders.items():
+            for position, doc_id in enumerate(order, 1):
+                ranks_by_id.setdefault(doc_id, {})[channel] = position
+        for rec in records:
+            rec["channel_ranks"] = ranks_by_id.get(rec["id"], {})
+            for channel in sorted(rec["channel_ranks"]):
+                marker = f"channel:{channel}"
+                if marker not in rec["flags"]:
+                    rec["flags"].append(marker)
         if self.flags.get("rrf", True):
-            # 加权 RRF：特征路与词法路权重可配。
+            # 加权 RRF：FTS、确定性特征、dense 三路独立召回并保留各自名次。
             # 实测（docs/EVAL.md 附录 A，合成集 medium）：提高词法权重会**持续抬高 MRR**
             # 同时**持续压低 Recall@20**（Recall@100 恒为 1.0，说明 gold 没丢、只是被挤出前 20）。
             # 默认 w_lex=0.1 是扫描点中唯一 Pareto 安全的取值：三种难度 MRR 均正增益且
             # Recall@20 全部保持 1.0000。取 0.1 的理由是"不牺牲 Recall@20"，
             # 不是早期注释里写的"防止等权抹平特征分"——那个说法已被扫描证伪。
             k = int(getattr(self.config, "rrf_k", RRF_K) or RRF_K)
-            w_feat = float(getattr(self.config, "rrf_weight_feature", 1.0))
-            w_lex = float(getattr(self.config, "rrf_weight_lexical", 0.25))
+            weights = {
+                "feature": float(getattr(self.config, "rrf_weight_feature", 1.0)),
+                "fts": float(getattr(self.config, "rrf_weight_lexical", 0.25)),
+                "dense": float(getattr(self.config, "rrf_weight_dense", 1.0)),
+            }
             fused: dict[str, float] = {}
-            for order, weight in ((feat_order, w_feat), (fts_order, w_lex)):
+            for channel, order in channel_orders.items():
+                weight = weights.get(channel, 0.0)
                 if weight == 0.0:
                     continue
                 for pos, doc_id in enumerate(order):
@@ -1025,6 +1269,7 @@ class RetrieverDB:
                 "SELECT COUNT(*) FROM views WHERE user_id=?", (user_id,)
             ).fetchone()[0]
             con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
+            con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM requests WHERE user_id=?", (user_id,))
@@ -1038,7 +1283,7 @@ class RetrieverDB:
             n = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             con.executescript(
                 "DELETE FROM fts; DELETE FROM messages; DELETE FROM views; "
-                "DELETE FROM requests; DELETE FROM sessions;"
+                "DELETE FROM embeddings; DELETE FROM requests; DELETE FROM sessions;"
             )
             return {"deleted_messages": n}
 
@@ -1066,6 +1311,7 @@ class RetrieverDB:
                     "SELECT COUNT(*) FROM messages WHERE user_id=?", (user_id,)
                 ).fetchone()[0]
                 con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM requests WHERE user_id=?", (user_id,))
@@ -1093,12 +1339,35 @@ class RetrieverDB:
 
     def stats(self) -> dict:
         with self.connection() as con:
+            embedding_rows = con.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            embedding_bytes = con.execute(
+                "SELECT COALESCE(SUM(length(vector)),0) FROM embeddings"
+            ).fetchone()[0]
+            index_bytes = 0
+            if self.db_path != ":memory:":
+                for suffix in ("", "-wal", "-shm"):
+                    try:
+                        index_bytes += os.path.getsize(self.db_path + suffix)
+                    except OSError:
+                        pass
             return {
                 "messages": con.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
                 "views": con.execute("SELECT COUNT(*) FROM views").fetchone()[0],
                 "users": con.execute("SELECT COUNT(DISTINCT user_id) FROM messages").fetchone()[0],
                 "sessions": con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
                 "db_path": self.db_path,
+                "index_bytes": index_bytes,
+                "embedding_rows": embedding_rows,
+                "embedding_bytes": embedding_bytes,
+                "embedding_model_identity": (
+                    str(self.embedding_backend.identity) if self.dense_enabled else None
+                ),
+                "embedding_model_hash": (
+                    str(self.embedding_backend.model_hash) if self.dense_enabled else None
+                ),
+                "embedding_dimension": (
+                    int(self.embedding_backend.dimension) if self.dense_enabled else None
+                ),
             }
 
     def close(self) -> None:

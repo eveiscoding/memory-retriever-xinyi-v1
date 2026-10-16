@@ -267,6 +267,7 @@ class MemoryService:
             item["view"] = evidence.view
             item["source_message_ids"] = evidence.source_message_ids
             item["evidence_flags"] = evidence.evidence_flags
+            item["channel_ranks"] = evidence.channel_ranks
         return item
 
     def __enter__(self):

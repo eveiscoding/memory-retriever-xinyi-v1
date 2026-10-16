@@ -133,8 +133,9 @@ def build_index(db: RetrieverDB, dataset: Dataset) -> tuple[dict, dict]:
 def run_stage(stage: str, flags: dict, dataset: Dataset, *, workdir: str,
               top_k: int = OFFICIAL_TOP_K) -> StageResult:
     """跑完一个消融档位：重建索引 → 逐条查询 → 汇总指标。"""
+    dense_backend = os.environ.get("AML_DENSE_BACKEND", "").strip()
     if flags.get("vector"):
-        available, reason = vector_backend_available()
+        available, reason = vector_backend_available(dense_backend)
         if not available:
             return StageResult(stage=stage, flags=dict(flags), skipped=True,
                                skip_reason=f"vector backend unavailable: {reason}")
@@ -148,6 +149,7 @@ def run_stage(stage: str, flags: dict, dataset: Dataset, *, workdir: str,
 
     config = RetrieverConfig(db_path=db_path, top_k_default=top_k, top_k_max=max(top_k, 100))
     config.flags = dict(flags)
+    config.dense_backend = dense_backend
     db = RetrieverDB(config)
     try:
         index, id_map = build_index(db, dataset)

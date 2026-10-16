@@ -35,8 +35,10 @@ synthetic ablation evidence but have not been assigned a new official score.
 - Enforces strict retrieval isolation by `user_id`.
 - Replays duplicate `(request_id, user_id)` writes idempotently.
 - Preserves every original message and links derived views back to source IDs.
-- Combines SQLite FTS5, Chinese character n-grams, exact entities, numbers,
-  dates, temporal signals, adjacency, reciprocal-rank fusion, and deduplication.
+- Generates FTS5, deterministic-feature, and optional dense candidates
+  independently, then combines them with configurable reciprocal-rank fusion.
+- Persists embeddings in SQLite with model identity/hash metadata and preserves
+  each channel's input rank in result provenance.
 - Applies guarded temporal supersession as a soft ranking signal; older evidence
   remains stored and retrievable.
 - Runs with Python's standard library and SQLite FTS5, with no third-party
@@ -61,8 +63,8 @@ Evidence retriever
   ├─ original messages
   ├─ sliding windows
   ├─ session segments
-  ├─ FTS5 and deterministic features
-  └─ fusion, temporal reranking, provenance, deduplication
+  ├─ independent FTS5, deterministic-feature, and dense channels
+  └─ configurable RRF, temporal signals, provenance, and deduplication
       │
       ▼
 Ranked source evidence — no answer generation
@@ -145,13 +147,14 @@ curl -sS http://127.0.0.1:8080/search \
       "created_at": "2026-08-05T16:00:00Z",
       "view": "message",
       "source_message_ids": ["..."],
-      "evidence_flags": ["lexical"]
+      "evidence_flags": ["lexical", "channel:fts", "channel:feature"],
+      "channel_ranks": {"fts": 1, "feature": 1}
     }
   ]
 }
 ```
 
-`view`, `source_message_ids`, and `evidence_flags` provide optional provenance.
+`view`, `source_message_ids`, `evidence_flags`, and `channel_ranks` provide optional provenance.
 Set `AML_INCLUDE_PROVENANCE=0` to omit them.
 
 ## Docker
@@ -184,17 +187,29 @@ Search, statistics, and deletion endpoints.
    IDs and request-level idempotency.
 2. **Build multiple views.** Message, sliding-window, and session-segment views
    provide different recall surfaces without replacing the source messages.
-3. **Generate candidates.** FTS5 retrieval uses Latin tokens, numbers, dates,
-   and Chinese unigrams/bigrams; optional answer choices can contribute query
-   terms.
+3. **Generate candidates independently.** FTS5, a bounded deterministic scan,
+   and an optional persisted dense index each produce their own ranked list;
+   optional answer choices can contribute query terms.
 4. **Score deterministic signals.** Exact substrings, token coverage, entities,
    numbers, dates, recency, and neighboring context contribute independent
    evidence.
 5. **Handle updates conservatively.** A newer near-duplicate receives a soft
    boost only when the query is temporal and explicit update language is
    present. The earlier evidence is demoted, never deleted.
-6. **Fuse and deduplicate.** Weighted reciprocal-rank fusion combines lexical
-   and feature ranks before deterministic tie-breaking.
+6. **Fuse and deduplicate.** Weighted reciprocal-rank fusion combines all
+   enabled channels before deterministic tie-breaking, while `channel_ranks`
+   records the source rank from every channel that retrieved an item.
+
+### Optional dense backend
+
+The default remains the standard-library-only path: leave `dense_backend` empty
+and `flags.vector=false`. For a deterministic local smoke backend, configure
+`dense_backend="hashing-v1"` and enable `flags.vector`. A production model can be
+provided as `module:factory`; the factory receives `dimension=...` and returns
+an object with `identity`, `model_hash`, `dimension`, and `embed(texts)`. Model
+packages are imported only after that backend is explicitly configured. Dense
+RRF weight defaults to the conservative `0.1`; increase it only with a locked
+model-specific retrieval comparison.
 
 All ranking controls live in `RetrieverConfig` and can be disabled independently
 for ablation.

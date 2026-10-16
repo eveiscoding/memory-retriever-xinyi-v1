@@ -128,13 +128,14 @@ curl -sS http://127.0.0.1:8080/search \
       "created_at": "2026-08-05T16:00:00Z",
       "view": "message",
       "source_message_ids": ["..."],
-      "evidence_flags": ["lexical"]
+      "evidence_flags": ["lexical", "channel:fts", "channel:feature"],
+      "channel_ranks": {"fts": 1, "feature": 1}
     }
   ]
 }
 ```
 
-`view`、`source_message_ids` 与 `evidence_flags` 是可选的来源追踪字段；设置
+`view`、`source_message_ids`、`evidence_flags` 与 `channel_ranks` 是可选的来源追踪字段；设置
 `AML_INCLUDE_PROVENANCE=0` 可关闭。
 
 ## Docker

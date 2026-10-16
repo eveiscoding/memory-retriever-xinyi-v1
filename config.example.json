@@ -14,12 +14,19 @@
   "top_k_max": 100,
   "max_candidates": 400,
   "max_query_tokens": 64,
+  "feature_scan_limit": 5000,
+  "dense_max_candidates": 400,
   "message_slot_ratio": 0.5,
 
   "_comment_rrf": "rrf_weight_lexical=0.1 是唯一「MRR 有增益且 Recall@20 不退化」的取值，见 docs/EVAL.md 附录 A。调高会用召回换排序。",
   "rrf_k": 60,
   "rrf_weight_feature": 1.0,
   "rrf_weight_lexical": 0.1,
+  "rrf_weight_dense": 0.1,
+
+  "_comment_dense": "留空即维持零依赖路径。hashing-v1 是显式启用的本地 smoke backend；生产 embedding backend 可配置为 module:factory，并自行固定模型 identity/hash。启用候选通道还需 flags.vector=true。",
+  "dense_backend": "",
+  "dense_dimension": 256,
 
   "recency_weight": 8.0,
   "recency_weight_intent": 12.0,
@@ -48,7 +55,7 @@
   "retention_days": 30,
   "cleanup_interval_seconds": 3600,
 
-  "_comment_flags": "检索增强开关，每项可独立关闭做消融。v1.1 默认启用 supersession+update_guard 的受保护组合；preference_role_boost、temporal_intent 与 vector 仍默认关闭。",
+  "_comment_flags": "检索增强开关，每项可独立关闭做消融。dense 需同时配置 dense_backend 并设置 vector=true；未配置时不导入任何模型依赖。",
   "flags": {
     "views": true,
     "exact": true,
