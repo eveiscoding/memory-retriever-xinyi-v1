@@ -268,6 +268,8 @@ class MemoryService:
             item["source_message_ids"] = evidence.source_message_ids
             item["evidence_flags"] = evidence.evidence_flags
             item["channel_ranks"] = evidence.channel_ranks
+            if evidence.semantic_score is not None:
+                item["semantic_score"] = evidence.semantic_score
         return item
 
     def __enter__(self):

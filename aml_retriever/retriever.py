@@ -26,6 +26,7 @@ import sqlite3
 import struct
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from . import features
 from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
+from .protected_rerank import protected_order
 from .views import (
     affected_window_starts,
     join_content,
@@ -81,6 +83,7 @@ class Evidence:
     provenance: str = ""
     evidence_flags: list[str] = field(default_factory=list)
     channel_ranks: dict[str, int] = field(default_factory=dict)
+    semantic_score: float | None = None
 
 
 @dataclass
@@ -132,6 +135,12 @@ class RetrieverDB:
         # A model alone does not silently change retrieval; both the backend
         # configuration and the vector ablation flag must be enabled.
         self.dense_enabled = bool(self.embedding_backend and self.flags.get("vector", False))
+        self.semantic_enabled = bool(self.flags.get("semantic_rerank", False))
+        if self.semantic_enabled and not self.embedding_backend:
+            raise ValueError("semantic_rerank requires an embedding backend")
+        self.embedding_enabled = self.dense_enabled or self.semantic_enabled
+        self._semantic_cache = OrderedDict()
+        self._semantic_cache_lock = threading.RLock()
 
         self._write_lock = threading.RLock()
         # 有界连接池：ThreadingHTTPServer 每请求一个线程，thread-local 连接会持续泄漏 fd，
@@ -144,7 +153,7 @@ class RetrieverDB:
             self._shared_mem_con = self._new_connection()
 
         self._init_schema()
-        if self.dense_enabled:
+        if self.embedding_enabled:
             self._synchronize_embedding_index()
 
     # ------------------------------------------------------------- connection
@@ -307,7 +316,7 @@ class RetrieverDB:
         return struct.unpack(f"<{int(dimension)}f", blob)
 
     def _embed_doc(self, con, doc_id, user_id, doc_type, content) -> None:
-        if not self.dense_enabled:
+        if not self.embedding_enabled:
             return
         backend = self.embedding_backend
         vectors = backend.embed([content])
@@ -737,7 +746,11 @@ class RetrieverDB:
             if not fts_candidates and self.flags.get("exact_scan", False):
                 fts_candidates = self._like_fallback(con, user_id, query)
             feature_candidates = self._feature_candidates(con, user_id, recall_text, tokens)
-            dense_candidates = self._dense_candidates(con, user_id, recall_text)
+            # Semantic mode freezes the no-dense baseline BEFORE scoring,
+            # deduplication and message slots. Dense-only candidates must not
+            # alter recency normalization, update pairs or baseline membership.
+            dense_candidates = ([] if self.semantic_enabled else
+                                self._dense_candidates(con, user_id, recall_text))
             channel_candidates = {
                 "fts": fts_candidates,
                 "feature": feature_candidates,
@@ -783,6 +796,8 @@ class RetrieverDB:
         if self.flags.get("dedup", True):
             ordered = self._dedup(ordered)
         final = self._apply_slot_guarantee(ordered, limit)
+        if self.semantic_enabled:
+            final = self._semantic_rerank(user_id, recall_text, final)
 
         results = [
             Evidence(
@@ -799,10 +814,65 @@ class RetrieverDB:
                 ),
                 evidence_flags=r["flags"],
                 channel_ranks=r["channel_ranks"],
+                semantic_score=r.get("semantic_score"),
             )
             for r in final
         ]
         return SearchResult(request_id=request_id, total=len(ordered), results=results)
+
+    def _semantic_rerank(self, user_id, query, records):
+        """Reuse persisted vectors; bounded process-local query/pool score cache.
+
+        No raw query/content is retained in cache keys. Model, user, content and
+        ordered pool hashes isolate revisions. Any scoring failure returns the
+        untouched baseline, never a partially reranked list.
+        """
+        if not records:
+            return records
+        backend = self.embedding_backend
+        digest = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest()
+        key = digest(json.dumps([user_id, query, str(backend.model_hash), [
+            (r["id"], digest(r["content"] or "")) for r in records
+        ]], ensure_ascii=False))
+        try:
+            with self._semantic_cache_lock:
+                scores = self._semantic_cache.get(key)
+                if scores is not None:
+                    self._semantic_cache.move_to_end(key)
+            if scores is None:
+                vectors = backend.embed([query])
+                if (len(vectors) != 1 or len(vectors[0]) != int(backend.dimension)
+                        or any(not math.isfinite(float(v)) for v in vectors[0])):
+                    raise ValueError("invalid query embedding")
+                scores = []
+                with self.connection() as con:
+                    for record in records:
+                        row = con.execute(
+                            "SELECT vector,dimension FROM embeddings WHERE doc_id=? "
+                            "AND user_id=? AND model_hash=? AND content_hash=?",
+                            (record["id"], user_id, str(backend.model_hash),
+                             digest(record["content"] or "")),
+                        ).fetchone()
+                        if row is None or row["dimension"] != backend.dimension:
+                            raise ValueError("missing/stale candidate embedding")
+                        stored = self._unpack_vector(row["vector"], row["dimension"])
+                        scores.append(self._cosine(vectors[0], stored))
+                if any(not math.isfinite(s) for s in scores):
+                    raise ValueError("non-finite semantic score")
+                with self._semantic_cache_lock:
+                    self._semantic_cache[key] = tuple(scores)
+                    self._semantic_cache.move_to_end(key)
+                    while len(self._semantic_cache) > 128:
+                        self._semantic_cache.popitem(last=False)
+            return protected_order(
+                records, scores, boundary=self.config.semantic_rerank_boundary,
+                pool=self.config.semantic_rerank_pool,
+                exact_quota=self.config.semantic_rerank_exact_quota,
+            )
+        except Exception:
+            for record in records:
+                record["flags"].append("semantic_rerank_fallback")
+            return records
 
     def _load_records(self, con, user_id, raw_candidates) -> list[dict]:
         msg_ids = [d for d, t, _ in raw_candidates if t == "message"]
@@ -1360,13 +1430,13 @@ class RetrieverDB:
                 "embedding_rows": embedding_rows,
                 "embedding_bytes": embedding_bytes,
                 "embedding_model_identity": (
-                    str(self.embedding_backend.identity) if self.dense_enabled else None
+                    str(self.embedding_backend.identity) if self.embedding_enabled else None
                 ),
                 "embedding_model_hash": (
-                    str(self.embedding_backend.model_hash) if self.dense_enabled else None
+                    str(self.embedding_backend.model_hash) if self.embedding_enabled else None
                 ),
                 "embedding_dimension": (
-                    int(self.embedding_backend.dimension) if self.dense_enabled else None
+                    int(self.embedding_backend.dimension) if self.embedding_enabled else None
                 ),
             }
 
