@@ -171,6 +171,29 @@ docker run --rm -p 8080:8080 \
 
 全部增强开关都位于 `RetrieverConfig`，可以单独关闭做消融。
 
+### 接入比赛指定的 Dense 模型
+
+默认仍不开启 Dense 通道，因此不需要联网或安装第三方包。第二期学术榜/开源方法榜可使用
+仓库内置的阿里云百炼 backend，通过 OpenAI-compatible 接口调用比赛指定的
+`text-embedding-v4`。在百炼创建 Workspace 和 API Key 后，将凭证配置为部署环境变量，
+不要写入配置文件或提交到仓库：
+
+```bash
+export DASHSCOPE_API_KEY="..."
+export DASHSCOPE_BASE_URL="https://<workspace-id>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+export AML_DENSE_BACKEND="aml_retriever.dashscope_embedding:create_backend"
+export AML_DENSE_DIMENSION="1024"
+export AML_FLAG_VECTOR="true"
+```
+
+请在新加坡（`ap-southeast-1`）地域创建 API Key 和业务空间，与上面的接入地址保持一致。
+使用仓库提供的生产 Compose 配置时，将 `.env.example` 复制为 `.env`，替换全部占位值后
+执行 `docker compose up --build`；`.env` 已被 Git 忽略。
+
+backend 每次最多提交 10 条文本；遇到 HTTP 429、临时 5xx 或网络错误会重试，并校验返回
+数量、顺序和向量维度。首次启用时会为数据库中的已有证据回填向量，因此正式部署前应预留
+相应的启动时间和 API 额度。
+
 ## 评测
 
 仓库内置确定性的合成评测台，用于回归和消融。以下数字属于开发证据，不能替代官方榜单成绩。

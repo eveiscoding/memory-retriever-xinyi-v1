@@ -24,9 +24,9 @@
   "rrf_weight_lexical": 0.1,
   "rrf_weight_dense": 0.1,
 
-  "_comment_dense": "留空即维持零依赖路径。hashing-v1 是显式启用的本地 smoke backend；生产 embedding backend 可配置为 module:factory，并自行固定模型 identity/hash。启用候选通道还需 flags.vector=true。",
+  "_comment_dense": "留空即维持零依赖路径。比赛指定的生产 backend 使用 aml_retriever.dashscope_embedding:create_backend，凭证由 DASHSCOPE_API_KEY 和 DASHSCOPE_BASE_URL 提供；hashing-v1 仅用于本地 smoke。启用候选通道还需 flags.vector=true。",
   "dense_backend": "",
-  "dense_dimension": 256,
+  "dense_dimension": 1024,
 
   "recency_weight": 8.0,
   "recency_weight_intent": 12.0,

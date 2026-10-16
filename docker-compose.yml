@@ -19,6 +19,12 @@ services:
       AML_REQUEST_QUEUE_SIZE: "64"
       AML_RETENTION_DAYS: "30"
       AML_CLEANUP_INTERVAL_SECONDS: "3600"
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?set DASHSCOPE_API_KEY in .env}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:?set DASHSCOPE_BASE_URL in .env}
+      AML_DENSE_BACKEND: aml_retriever.dashscope_embedding:create_backend
+      AML_DENSE_DIMENSION: "1024"
+      AML_FLAG_VECTOR: "true"
+      AML_RRF_W_DENSE: "0.1"
     volumes:
       - ./data:/data
     security_opt:

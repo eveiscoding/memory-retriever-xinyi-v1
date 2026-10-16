@@ -211,6 +211,28 @@ packages are imported only after that backend is explicitly configured. Dense
 RRF weight defaults to the conservative `0.1`; increase it only with a locked
 model-specific retrieval comparison.
 
+For the Cycle 2 Academic/Open-source track, the included Alibaba Cloud Model
+Studio backend calls the required `text-embedding-v4` model through its
+OpenAI-compatible endpoint. Create a Model Studio workspace and API key, then
+configure deployment secrets (never commit the key):
+
+```bash
+export DASHSCOPE_API_KEY="..."
+export DASHSCOPE_BASE_URL="https://<workspace-id>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+export AML_DENSE_BACKEND="aml_retriever.dashscope_embedding:create_backend"
+export AML_DENSE_DIMENSION="1024"
+export AML_FLAG_VECTOR="true"
+```
+
+Create the API key and workspace in Singapore (`ap-southeast-1`) to match this
+endpoint. For the supplied production Compose configuration, copy `.env.example` to
+`.env`, replace all placeholders, and run `docker compose up --build`. The
+`.env` file is ignored by Git.
+
+The backend batches at most 10 texts per request, retries HTTP 429 and transient
+5xx/network failures, and rejects incomplete or wrong-width vectors. The first
+startup after enabling it backfills embeddings for existing stored evidence.
+
 All ranking controls live in `RetrieverConfig` and can be disabled independently
 for ablation.
 
