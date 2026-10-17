@@ -29,22 +29,19 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
 
 1. Freeze the no-dense FTS + feature baseline before scoring, dedup and message
    slots. Even if vector=1, semantic mode bypasses dense candidate generation.
-2. Freeze membership after dedup and slots, then sort in separate segments
-   1–5, 6–20 and 21–100 with default settings. The original first result stays
-   first. Within each segment, up to three exact numeric/date/entity/phrase
-   matches with disjoint source IDs and distinct normalized content retain
-   their positions. Repeated views do not consume additional escape slots.
-   Entity escape eligibility filters question/stop words such as How/Which;
-   the deterministic scorer and its candidate pool are unchanged.
-3. Top5/20/100 IDs and source coverage are identical for on/off calls using the
-   same code, input, top_k=100 and user/session IDs. Time interval/order,
-   date and current-state queries also retain baseline order through rank 20:
-   similarity alone does not establish event chronology or current validity.
-   Intent is inferred from the query alone, never options or benchmark labels.
-   Ranks 21–100 can still change for these queries. Defaults stay disabled.
-   Other within-segment gold ranks and aggregate nDCG may still regress.
-   Different requested top_k calls retain independent baseline message slots;
-   this is not a promise of prefix consistency across separate Search calls.
+2. Freeze membership after dedup and slots. Keep baseline order through the
+   configured boundary (default 20); only ranks 21–100 are semantically reranked.
+   Earlier front-bucket variants failed public quality gates. This conservative
+   tail-only mode does not claim to improve Top20 ranking or reasoning.
+3. With boundary=20 and top_k=100, all Top5/20 IDs, ranks and source coverage are
+   unchanged. Top100 membership also stays fixed. Tail segments retain up to
+   three exact matches with disjoint sources and distinct normalized content.
+   Entity escape eligibility filters How/Which and other query stop words;
+   baseline entity scoring is unchanged. No candidate is inserted or discarded.
+   There is no benchmark-label, gold-evidence or query-intent routing. Smaller
+   configured boundaries weaken the frozen-prefix guarantee; an extra cutoff at
+   5 still preserves Top5 membership inside the pool. Separate top_k calls retain
+   independent baseline message slots, without a prefix-consistency promise.
 4. Failures return baseline order with `semantic_rerank_fallback`. Indexing/Add
    failures still follow the existing transaction behavior; they are not masked.
 5. `AML_INCLUDE_PROVENANCE=1` exposes pre/post ranks and `semantic_score`.
@@ -54,7 +51,8 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
 Disable `AML_FLAG_SEMANTIC_RERANK` to roll back. Keep vector=0 to restore the
 no-dense path. Protection eligibility alone filters query stop words; entity features in baseline
 scoring are unchanged. Membership guarantees use the same input and IDs.
-The semantic feature remains disabled by default. The gate is actual preference
-and multi-session MRR/nDCG improvement, preserved Recall@20/100, no update-class
-regression and acceptable controlled Search latency. Unit fixtures prove the
+The semantic feature remains disabled by default. The strict paired gate requires no per-gold coverage loss at 5/20/100 or
+aggregate/capability regression. Tail-only gains can be small and do not establish
+the roadmap target of improved preference/multi-session Top20 ranking. That
+requires further work and independent validation; the feature stays experimental. Unit fixtures prove the
 invariants only, not real-model quality.

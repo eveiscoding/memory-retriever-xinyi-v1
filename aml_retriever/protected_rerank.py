@@ -1,15 +1,14 @@
 """Membership-preserving rerank; scores are bi-encoder cosine, not cross-encoder.
 
-Freeze membership AFTER baseline dedup and message slots. Reorder separately on
-each side of the configured boundary. This preserves source coverage at that
-boundary and at the requested limit, not at every possible cutoff.
+Freeze membership AFTER baseline dedup and message slots. Keep baseline order
+through the configured boundary; rerank only its tail. With default boundary=20,
+all Top5/20 evidence and ranks are unchanged, while Top100 membership is retained.
 """
 from __future__ import annotations
 
 import math
 
-from .features import (extract_protection_entities, has_event_relation_intent,
-                       has_temporal_intent, has_date_value_intent)
+from .features import extract_protection_entities
 
 EXACT_FLAGS = {"exact_substring", "phrase", "entity", "date", "number"}
 
@@ -50,23 +49,18 @@ def protected_order(records, scores, *, boundary=20, pool=100, exact_quota=3,
     stop = min(pool, len(records))
     output = list(records)
     cuts = {0, min(5, stop), min(boundary, stop), stop}
-    # Every query retains all baseline Top5 evidence and its primary result.
-    # Time/current-state queries conservatively retain the entire first bucket
-    # order: similarity alone is not a reliable event/state ordering signal.
-    temporal_guard = (has_event_relation_intent(query) or has_temporal_intent(query)
-                      or has_date_value_intent(query))
+    # Semantic ranking of the front bucket failed public quality gates. Keep
+    # its complete order for every query; no dataset/intent routing is needed.
     entities = ([entity.lower() for entity in extract_protection_entities(query)]
                 if query else None)
     cuts = sorted(cuts)
     for start, end in zip(cuts, cuts[1:]):
         positions = list(range(start, end))
-        if temporal_guard and end <= min(boundary, stop):
+        if end <= min(boundary, stop):
             continue
         # Diverse exact matches retain their original positions; no candidate
         # is injected or removed to implement this escape quota.
         anchors = _diverse_anchors(records, positions, exact_quota, entities)
-        if start == 0:
-            anchors = sorted(set(anchors) | {0})
         movable = [i for i in positions if i not in anchors]
         ranked = sorted(movable, key=lambda i: (-scores[i], i))
         for target, source in zip(movable, ranked):
