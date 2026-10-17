@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import math
 
-from .features import has_event_relation_intent
+from .features import (extract_protection_entities, has_event_relation_intent,
+                       has_temporal_intent, has_date_value_intent)
 
 EXACT_FLAGS = {"exact_substring", "phrase", "entity", "date", "number"}
 
 
-def _diverse_anchors(records, positions, quota):
+def _diverse_anchors(records, positions, quota, entities=None):
     """Spend escape slots on disjoint provenance, not repeated views of it.
 
     Provenance overlap and identical normalized content are conservative duplicate
@@ -24,7 +25,12 @@ def _diverse_anchors(records, positions, quota):
         record = records[i]
         if len(anchors) >= quota:
             break
-        if not EXACT_FLAGS.intersection(record["flags"]):
+        flags = set(record['flags'])
+        if entities is not None and 'entity' in flags and not any(
+            entity in (record.get('content') or '').lower() for entity in entities
+        ):
+            flags.remove('entity')
+        if not EXACT_FLAGS.intersection(flags):
             continue
         source_ids = set(record.get("source_ids") or [record["id"]])
         content = " ".join((record.get("content") or "").casefold().split())
@@ -43,17 +49,24 @@ def protected_order(records, scores, *, boundary=20, pool=100, exact_quota=3,
         raise ValueError("semantic reranker returned invalid scores")
     stop = min(pool, len(records))
     output = list(records)
-    cuts = {0, min(boundary, stop), stop}
-    # Temporal relations need multiple events. Preserve every baseline Top5
-    # source, rather than guessing which event is gold or favoring recent ones.
-    if has_event_relation_intent(query):
-        cuts.add(min(5, stop))
+    cuts = {0, min(5, stop), min(boundary, stop), stop}
+    # Every query retains all baseline Top5 evidence and its primary result.
+    # Time/current-state queries conservatively retain the entire first bucket
+    # order: similarity alone is not a reliable event/state ordering signal.
+    temporal_guard = (has_event_relation_intent(query) or has_temporal_intent(query)
+                      or has_date_value_intent(query))
+    entities = ([entity.lower() for entity in extract_protection_entities(query)]
+                if query else None)
     cuts = sorted(cuts)
     for start, end in zip(cuts, cuts[1:]):
         positions = list(range(start, end))
+        if temporal_guard and end <= min(boundary, stop):
+            continue
         # Diverse exact matches retain their original positions; no candidate
         # is injected or removed to implement this escape quota.
-        anchors = _diverse_anchors(records, positions, exact_quota)
+        anchors = _diverse_anchors(records, positions, exact_quota, entities)
+        if start == 0:
+            anchors = sorted(set(anchors) | {0})
         movable = [i for i in positions if i not in anchors]
         ranked = sorted(movable, key=lambda i: (-scores[i], i))
         for target, source in zip(movable, ranked):

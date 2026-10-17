@@ -29,20 +29,21 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
 
 1. Freeze the no-dense FTS + feature baseline before scoring, dedup and message
    slots. Even if vector=1, semantic mode bypasses dense candidate generation.
-2. Freeze the final result membership after dedup and slots, then sort separately
-   inside ranks 1–20 and 21–100. The first three exact numeric/date/entity/phrase
-   matches with disjoint source IDs and distinct normalized content in each
-   segment retain their positions. Repeated views do not consume extra escape
-   slots. Different messages are not assumed to be the same event. No record is
-   discarded or injected. Entries beyond the pool stay put.
-3. For an identical top_k=100 baseline call, candidate IDs and source coverage at
-   20 and 100 are identical by construction. Other cutoffs (notably 5) can change.
-   For interval/order queries, an additional boundary at 5 preserves baseline
-   Top5 membership (segments 1–5, 6–20, 21–100 with default settings). This protects
-   multiple historical events without guessing gold evidence or boosting recency.
-   Query intent is inferred from the query alone, never options or dataset labels.
-   Ordering within each segment can still change; MRR/nDCG may still regress.
-   Different requested top_k values have independent baseline slot guarantees;
+2. Freeze membership after dedup and slots, then sort in separate segments
+   1–5, 6–20 and 21–100 with default settings. The original first result stays
+   first. Within each segment, up to three exact numeric/date/entity/phrase
+   matches with disjoint source IDs and distinct normalized content retain
+   their positions. Repeated views do not consume additional escape slots.
+   Entity escape eligibility filters question/stop words such as How/Which;
+   the deterministic scorer and its candidate pool are unchanged.
+3. Top5/20/100 IDs and source coverage are identical for on/off calls using the
+   same code, input, top_k=100 and user/session IDs. Time interval/order,
+   date and current-state queries also retain baseline order through rank 20:
+   similarity alone does not establish event chronology or current validity.
+   Intent is inferred from the query alone, never options or benchmark labels.
+   Ranks 21–100 can still change for these queries. Defaults stay disabled.
+   Other within-segment gold ranks and aggregate nDCG may still regress.
+   Different requested top_k calls retain independent baseline message slots;
    this is not a promise of prefix consistency across separate Search calls.
 4. Failures return baseline order with `semantic_rerank_fallback`. Indexing/Add
    failures still follow the existing transaction behavior; they are not masked.
@@ -51,9 +52,8 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
    after semantic reordering. Consumers must respect the returned list order.
 
 Disable `AML_FLAG_SEMANTIC_RERANK` to roll back. Keep vector=0 to restore the
-no-dense path. Entity extraction now filters query stop words, including How/Which;
-this also affects deterministic retrieval when semantic rerank is off. Membership
-guarantees compare on/off calls using the same code, not different code versions.
+no-dense path. Protection eligibility alone filters query stop words; entity features in baseline
+scoring are unchanged. Membership guarantees use the same input and IDs.
 The semantic feature remains disabled by default. The gate is actual preference
 and multi-session MRR/nDCG improvement, preserved Recall@20/100, no update-class
 regression and acceptable controlled Search latency. Unit fixtures prove the

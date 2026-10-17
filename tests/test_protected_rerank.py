@@ -31,10 +31,28 @@ def records(count):
 
 class ProtectedOrderTests(unittest.TestCase):
     def test_question_words_are_not_entities_but_names_survive(self):
-        self.assertEqual(features.extract_entities(
+        self.assertEqual(features.extract_protection_entities(
             'How Which When What Who Where Did Does Is The Alice NASA MoMA'),
             ['Alice', 'NASA', 'MoMA'])
         self.assertIn('北京', features.extract_entities('北京'))
+        self.assertEqual(features.extract_entities('How Which Alice'), ['How', 'Which', 'Alice'])
+
+    def test_entity_flags_from_question_words_do_not_anchor(self):
+        original = records(10)
+        original[1].update(flags=['entity'], content='How is your day?')
+        original[2].update(flags=['entity'], content='Alice confirmed the booking.')
+        ranked = protected_order(original, list(range(10)), query='How did Alice book?')
+        self.assertEqual(ranked[0]['id'], '0')
+        self.assertNotEqual(ranked[1]['id'], '1')
+        self.assertEqual(ranked[2]['id'], '2')
+
+    def test_temporal_and_current_state_keep_front_bucket_order(self):
+        for query in ('How long between two visits?', 'Where did Rachel move recently?',
+                      'When did I graduate?', 'Which trip happened first?'):
+            original = records(100)
+            ranked = protected_order(original, list(range(100)), query=query)
+            self.assertEqual([r['id'] for r in ranked[:20]], [str(i) for i in range(20)])
+            self.assertEqual(ranked[20]['id'], '99')
 
     def test_event_relations_are_separate_from_current_state_intent(self):
         for query in ('How long between my two visits?', 'Which happened first before dinner?',
@@ -84,15 +102,15 @@ class ProtectedOrderTests(unittest.TestCase):
         self.assertEqual({r['id'] for r in ranked[:20]}, {str(i) for i in range(20)})
         self.assertEqual({r['id'] for r in ranked[:100]}, {str(i) for i in range(100)})
         self.assertEqual([r['id'] for r in ranked[100:]], [str(i) for i in range(100, 120)])
-        self.assertEqual(ranked[0]['id'], '19')
-        self.assertEqual(ranked[0]['channel_ranks'], {'pre_rerank': 20, 'post_rerank': 1})
+        self.assertEqual([r['id'] for r in ranked[:5]], ['0', '4', '3', '2', '1'])
+        self.assertEqual(ranked[1]['channel_ranks'], {'pre_rerank': 5, 'post_rerank': 2})
 
     def test_exact_escape_quota(self):
         original = records(10)
         for i in range(4):
             original[i]['flags'] = ['number']
         ranked = protected_order(original, list(range(10)), exact_quota=3)
-        self.assertEqual([r['id'] for r in ranked[:4]], ['0', '1', '2', '9'])
+        self.assertEqual([r['id'] for r in ranked[:4]], ['0', '1', '2', '4'])
 
     def test_reject_invalid_scores_before_mutating(self):
         for values in ([1.], [math.nan, 1.], [math.inf, 1.]):
@@ -126,7 +144,7 @@ class SemanticIntegrationTests(unittest.TestCase):
         self.db.semantic_enabled = True
         self.db.dense_enabled = True
         candidate = self.search()
-        for cutoff in (20, 100):
+        for cutoff in (5, 20, 100):
             self.assertEqual({r.id for r in baseline.results[:cutoff]},
                              {r.id for r in candidate.results[:cutoff]})
         self.assertTrue(all(r.semantic_score is not None for r in candidate.results))

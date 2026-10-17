@@ -269,10 +269,15 @@ def extract_entities(text: str) -> list[str]:
     uniq: list[str] = []
     for tok in out:
         low = tok.lower()
-        if low not in seen and low not in _STOP:
+        if low not in seen:
             seen.add(low)
             uniq.append(tok)
     return uniq
+
+
+def extract_protection_entities(text: str) -> list[str]:
+    """Entity escape slots exclude question/stop words; baseline scoring is unchanged."""
+    return [entity for entity in extract_entities(text) if entity.lower() not in _STOP]
 
 
 def normalize(text: str) -> str:
@@ -289,6 +294,7 @@ __all__ = [
     "extract_dates",
     "extract_phrases",
     "extract_entities",
+    "extract_protection_entities",
     "normalize",
     "has_temporal_intent",
     "has_event_relation_intent",
