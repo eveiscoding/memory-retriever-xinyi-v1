@@ -109,6 +109,18 @@ def has_temporal_intent(query: str) -> bool:
     return any(marker in lowered for marker in _TEMPORAL_EN)
 
 
+def has_event_relation_intent(query: str) -> bool:
+    """Historical intervals/order, independent of current-state recency boosts."""
+    return bool(re.search(
+        r"\b(?:how\s+long|how\s+many\s+(?:days|weeks|months|years)|"
+        r"before|after|between|earlier|later|chronological|chronologically|"
+        r"in\s+(?:what|which)\s+order|time\s+(?:gap|interval))\b"
+        r"|\b(?:which|what)\b[^?.!]{0,100}\b(?:first|last)\b"
+        r"|相隔|间隔|先后|顺序|之前|之后|多久|多长时间",
+        query or "", re.IGNORECASE,
+    ))
+
+
 def has_update_cue(text: str) -> bool:
     """判断陈述是否显式表达状态替换或旧值失效。"""
     if not text:
@@ -257,7 +269,7 @@ def extract_entities(text: str) -> list[str]:
     uniq: list[str] = []
     for tok in out:
         low = tok.lower()
-        if low not in seen:
+        if low not in seen and low not in _STOP:
             seen.add(low)
             uniq.append(tok)
     return uniq
@@ -279,6 +291,7 @@ __all__ = [
     "extract_entities",
     "normalize",
     "has_temporal_intent",
+    "has_event_relation_intent",
     "has_update_cue",
     "has_preference_intent",
     "has_direct_preference_statement",

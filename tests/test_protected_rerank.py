@@ -2,6 +2,7 @@ import math
 import unittest
 
 from aml_retriever.config import RetrieverConfig
+from aml_retriever import features
 from aml_retriever.protected_rerank import protected_order
 from aml_retriever.retriever import RetrieverDB
 
@@ -29,6 +30,54 @@ def records(count):
 
 
 class ProtectedOrderTests(unittest.TestCase):
+    def test_question_words_are_not_entities_but_names_survive(self):
+        self.assertEqual(features.extract_entities(
+            'How Which When What Who Where Did Does Is The Alice NASA MoMA'),
+            ['Alice', 'NASA', 'MoMA'])
+        self.assertIn('北京', features.extract_entities('北京'))
+
+    def test_event_relations_are_separate_from_current_state_intent(self):
+        for query in ('How long between my two visits?', 'Which happened first before dinner?',
+                      'How many months after graduation?', 'In what order did I move?',
+                      'Which of my visits happened first?',
+                      '两次参观相隔多久？', '搬家和入职的先后顺序'):
+            with self.subTest(query=query):
+                self.assertTrue(features.has_event_relation_intent(query))
+        for query in ('What is my current address?', 'Recommend a museum',
+                      'How many tickets?', 'the afternoon walk', ''):
+            with self.subTest(query=query):
+                self.assertFalse(features.has_event_relation_intent(query))
+        self.assertFalse(features.has_temporal_intent('How long between my two visits?'))
+
+    def test_duplicate_views_do_not_exhaust_escape_quota(self):
+        original = records(10)
+        for i in range(5):
+            original[i]['flags'] = ['entity']
+        original[0]['source_ids'] = ['event-a', 'context']
+        original[1]['source_ids'] = ['event-a']
+        original[2]['content'] = '  SAME evidence '
+        original[3]['content'] = 'same   EVIDENCE'
+        ranked = protected_order(original, list(range(10)), exact_quota=3)
+        # Distinct provenance/content at 0, 2, 4 is anchored. The two duplicate
+        # records can move; no evidence is discarded, including shared sources.
+        self.assertEqual([ranked[i]['id'] for i in (0, 2, 4)], ['0', '2', '4'])
+        self.assertNotEqual(ranked[1]['id'], '1')
+        self.assertNotEqual(ranked[3]['id'], '3')
+        self.assertEqual({r['id'] for r in ranked}, {str(i) for i in range(10)})
+
+    def test_temporal_top5_preserves_both_events_and_boundary_membership(self):
+        for boundary, pool in ((20, 100), (3, 100), (20, 3), (2, 4)):
+            for count in (0, 1, 5, 12, 120):
+                original = records(count)
+                ranked = protected_order(original, list(range(count)), query=
+                    'How long between the first visit and the second visit?',
+                    exact_quota=0, boundary=boundary, pool=pool)
+                for cutoff in (min(5, pool), boundary, pool):
+                    self.assertEqual({r['id'] for r in ranked[:cutoff]},
+                                     {str(i) for i in range(min(cutoff, count))})
+                self.assertEqual([r['id'] for r in ranked[pool:]],
+                                 [str(i) for i in range(pool, count)])
+
     def test_membership_boundaries_and_diagnostics(self):
         original = records(120)
         ranked = protected_order(original, list(range(120)))
@@ -93,6 +142,19 @@ class SemanticIntegrationTests(unittest.TestCase):
         result = self.search()
         self.assertTrue(all('semantic_rerank_fallback' in r.evidence_flags for r in result.results))
         self.assertTrue(all(r.semantic_score is None for r in result.results))
+
+    def test_event_query_guard_is_used_by_search(self):
+        query = 'How long between topic target entry visits?'
+        self.db.semantic_enabled = False
+        self.db.dense_enabled = False
+        baseline = self.db.search(user_id='u', query=query, top_k=100)
+        self.db.semantic_enabled = True
+        candidate = self.db.search(user_id='u', query=query, top_k=100)
+        self.assertGreater(len(baseline.results), 5)
+        for cutoff in (5, 20, 100):
+            self.assertEqual({r.id for r in baseline.results[:cutoff]},
+                             {r.id for r in candidate.results[:cutoff]})
+        self.assertTrue(all(r.semantic_score is not None for r in candidate.results))
 
     def test_small_limit_and_isolation(self):
         self.assertEqual(len(self.search(limit=5).results), 5)

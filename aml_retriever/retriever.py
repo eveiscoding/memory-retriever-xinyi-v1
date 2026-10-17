@@ -797,7 +797,7 @@ class RetrieverDB:
             ordered = self._dedup(ordered)
         final = self._apply_slot_guarantee(ordered, limit)
         if self.semantic_enabled:
-            final = self._semantic_rerank(user_id, recall_text, final)
+            final = self._semantic_rerank(user_id, recall_text, final, intent_query=query)
 
         results = [
             Evidence(
@@ -820,7 +820,7 @@ class RetrieverDB:
         ]
         return SearchResult(request_id=request_id, total=len(ordered), results=results)
 
-    def _semantic_rerank(self, user_id, query, records):
+    def _semantic_rerank(self, user_id, query, records, *, intent_query=None):
         """Reuse persisted vectors; bounded process-local query/pool score cache.
 
         No raw query/content is retained in cache keys. Model, user, content and
@@ -868,6 +868,7 @@ class RetrieverDB:
                 records, scores, boundary=self.config.semantic_rerank_boundary,
                 pool=self.config.semantic_rerank_pool,
                 exact_quota=self.config.semantic_rerank_exact_quota,
+                query=query if intent_query is None else intent_query,
             )
         except Exception:
             for record in records:

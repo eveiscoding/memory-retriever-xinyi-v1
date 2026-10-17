@@ -31,10 +31,17 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
    slots. Even if vector=1, semantic mode bypasses dense candidate generation.
 2. Freeze the final result membership after dedup and slots, then sort separately
    inside ranks 1–20 and 21–100. The first three exact numeric/date/entity/phrase
-   matches in each bucket retain their positions; this is a quota, not a gold
-   oracle. No record is discarded or injected. Entries beyond the pool stay put.
+   matches with disjoint source IDs and distinct normalized content in each
+   segment retain their positions. Repeated views do not consume extra escape
+   slots. Different messages are not assumed to be the same event. No record is
+   discarded or injected. Entries beyond the pool stay put.
 3. For an identical top_k=100 baseline call, candidate IDs and source coverage at
    20 and 100 are identical by construction. Other cutoffs (notably 5) can change.
+   For interval/order queries, an additional boundary at 5 preserves baseline
+   Top5 membership (segments 1–5, 6–20, 21–100 with default settings). This protects
+   multiple historical events without guessing gold evidence or boosting recency.
+   Query intent is inferred from the query alone, never options or dataset labels.
+   Ordering within each segment can still change; MRR/nDCG may still regress.
    Different requested top_k values have independent baseline slot guarantees;
    this is not a promise of prefix consistency across separate Search calls.
 4. Failures return baseline order with `semantic_rerank_fallback`. Indexing/Add
@@ -44,7 +51,10 @@ Provider calls can incur fees. No GPT generation or new model is introduced.
    after semantic reordering. Consumers must respect the returned list order.
 
 Disable `AML_FLAG_SEMANTIC_RERANK` to roll back. Keep vector=0 to restore the
-original no-dense path. Defaults remain unchanged. The gate is actual preference
+no-dense path. Entity extraction now filters query stop words, including How/Which;
+this also affects deterministic retrieval when semantic rerank is off. Membership
+guarantees compare on/off calls using the same code, not different code versions.
+The semantic feature remains disabled by default. The gate is actual preference
 and multi-session MRR/nDCG improvement, preserved Recall@20/100, no update-class
 regression and acceptable controlled Search latency. Unit fixtures prove the
 invariants only, not real-model quality.
