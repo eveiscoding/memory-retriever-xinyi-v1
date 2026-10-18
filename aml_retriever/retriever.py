@@ -35,6 +35,7 @@ from . import features
 from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
 from .protected_rerank import protected_order
+from .pair_rerank import load_pair_backend, pair_order
 from .views import (
     affected_window_starts,
     join_content,
@@ -123,6 +124,7 @@ class RetrieverDB:
         config: RetrieverConfig | None = None,
         db_path: str | None = None,
         embedding_backend=None,
+        pair_backend=None,
     ):
         self.config = config or RetrieverConfig()
         if db_path is not None:
@@ -138,6 +140,16 @@ class RetrieverDB:
         self.semantic_enabled = bool(self.flags.get("semantic_rerank", False))
         if self.semantic_enabled and not self.embedding_backend:
             raise ValueError("semantic_rerank requires an embedding backend")
+        self.pair_enabled = bool(self.flags.get("pair_rerank", False))
+        if self.pair_enabled and self.semantic_enabled:
+            raise ValueError("pair_rerank and semantic_rerank are independent alternatives")
+        if not 1 <= self.config.pair_rerank_pool <= self.config.top_k_max:
+            raise ValueError("invalid pair rerank pool")
+        self.pair_backend = (pair_backend or load_pair_backend(self.config.pair_backend)
+                             if self.pair_enabled else None)
+        if self.pair_enabled and self.pair_backend is None:
+            raise ValueError("pair_rerank requires a pair backend")
+        self._pair_lock = threading.RLock()
         self.embedding_enabled = self.dense_enabled or self.semantic_enabled
         self._semantic_cache = OrderedDict()
         self._semantic_cache_lock = threading.RLock()
@@ -749,7 +761,7 @@ class RetrieverDB:
             # Semantic mode freezes the no-dense baseline BEFORE scoring,
             # deduplication and message slots. Dense-only candidates must not
             # alter recency normalization, update pairs or baseline membership.
-            dense_candidates = ([] if self.semantic_enabled else
+            dense_candidates = ([] if self.semantic_enabled or self.pair_enabled else
                                 self._dense_candidates(con, user_id, recall_text))
             channel_candidates = {
                 "fts": fts_candidates,
@@ -799,6 +811,9 @@ class RetrieverDB:
         if self.semantic_enabled:
             final = self._semantic_rerank(user_id, recall_text, final, intent_query=query)
 
+        if self.pair_enabled:
+            final = self._pair_rerank(recall_text, final)
+
         results = [
             Evidence(
                 id=r["id"],
@@ -819,6 +834,22 @@ class RetrieverDB:
             for r in final
         ]
         return SearchResult(request_id=request_id, total=len(ordered), results=results)
+
+    def _pair_rerank(self, query, records):
+        if not records:
+            return records
+        try:
+            count = min(len(records), self.config.pair_rerank_pool)
+            # No database lock is held during model inference. Serial calls bound
+            # model memory under concurrent HTTP searches. No query/result cache.
+            with self._pair_lock:
+                scores = self.pair_backend.score(
+                    query, [r["content"] or "" for r in records[:count]])
+            return pair_order(records, scores, pool=count)
+        except Exception:
+            for record in records:
+                record["flags"].append("pair_rerank_fallback")
+            return records
 
     def _semantic_rerank(self, user_id, query, records, *, intent_query=None):
         """Reuse persisted vectors; bounded process-local query/pool score cache.

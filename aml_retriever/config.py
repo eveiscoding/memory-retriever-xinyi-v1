@@ -35,6 +35,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "use_options": True, # Search 的 options 字段参与候选召回
     "exact_scan": False, # FTS 无命中时的兜底 LIKE 全扫（代价高，默认关闭）
     "vector": False,     # dense 候选通道；还需显式配置 dense_backend
+    "pair_rerank": False,  # query/document cross-encoder, experimental
     "semantic_rerank": False,  # 冻结原召回集合后，用 embedding 分桶重排（实验）
     # 覆写检测（supersession）：在候选集内找「话题高度重合但更晚」的消息对，
     # 判定后者覆写前者，抬高后者、轻降前者。与 temporal_intent 的区别是
@@ -86,6 +87,8 @@ class RetrieverConfig:
     # 内置确定性 smoke backend；生产模型可用 module:factory 插件提供。
     dense_backend: str = ""
     dense_dimension: int = 256
+    pair_backend: str = ""
+    pair_rerank_pool: int = 100
     semantic_rerank_pool: int = 100
     semantic_rerank_boundary: int = 20
     semantic_rerank_exact_quota: int = 3
@@ -160,6 +163,8 @@ class RetrieverConfig:
             "AML_RRF_W_DENSE": ("rrf_weight_dense", float),
             "AML_DENSE_BACKEND": ("dense_backend", str),
             "AML_DENSE_DIMENSION": ("dense_dimension", int),
+            "AML_PAIR_BACKEND": ("pair_backend", str),
+            "AML_PAIR_RERANK_POOL": ("pair_rerank_pool", int),
             "AML_SEMANTIC_RERANK_POOL": ("semantic_rerank_pool", int),
             "AML_SEMANTIC_RERANK_BOUNDARY": ("semantic_rerank_boundary", int),
             "AML_SEMANTIC_RERANK_EXACT_QUOTA": ("semantic_rerank_exact_quota", int),
@@ -220,6 +225,10 @@ class RetrieverConfig:
             raise ValueError("dense_dimension must be at least 8")
         if not 1 <= self.semantic_rerank_boundary <= self.semantic_rerank_pool <= self.top_k_max:
             raise ValueError("semantic rerank requires 1 <= boundary <= pool <= top_k_max")
+        if not 1 <= self.pair_rerank_pool <= self.top_k_max:
+            raise ValueError("pair rerank pool must be between 1 and top_k_max")
+        if self.flags.get("pair_rerank") and self.flags.get("semantic_rerank"):
+            raise ValueError("pair_rerank and semantic_rerank are independent alternatives")
         if self.semantic_rerank_exact_quota < 0:
             raise ValueError("semantic_rerank_exact_quota must be nonnegative")
         if int(self.retention_days) < 0 or int(self.cleanup_interval_seconds) < 1:
