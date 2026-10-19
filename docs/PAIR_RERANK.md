@@ -111,3 +111,28 @@ Official competition FAQ 05 (checked 2026-10-19) explicitly says rerankers are
 unrestricted; academic embedding is text-embedding-v4 and LLM components are
 gpt-4o-mini. Search must still return evidence rather than generated answers:
 https://agentmemories.ai/competition/
+
+## Pure multilingual MiniLM deployment profile
+
+`config.mminilm-pure.env.example` selects pure logit ordering, no RRF or dense
+retrieval. Global defaults remain off. Build the optional CPU image using
+`docker build -f Dockerfile.onnx -t aml-mminilm:local .`; mount the locked local
+snapshot read-only at the profile's model path. Load the profile with `--env-file`
+and supply authentication separately. Experimental Smoke requires a fresh DB.
+
+Publisher: `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (Apache-2.0), revision
+`1427fd652930e4ba29e8149678df786c240d8825`. Use the publisher's INT8 AVX2 graph
+`onnx/model_quint8_avx2.onnx`, SHA256
+`6c2513767fb63d008a4377bef7a7a3555433d9436342bb53e35a3a72ffc52d4b`.
+Source: https://huggingface.co/cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+
+Lock all tokenizer/config files as well. The tested snapshot's backend hash is
+`781f3f03fe04bf180ba0d912b6ee7f0177cf793176b5a317a8a5e0e8e7036559`.
+Verify it before routing. Pool=100/context=512/batch=1/threads=1 preserve the
+public-data experiment's model settings. The 2-vCPU host took approximately
+30 seconds per 100-candidate query; inference serializes concurrent requests.
+Check queue latency against client timeouts before enabling the endpoint.
+
+The offline public-data trial had case regressions and failed the strict
+no-regression gate. An explicitly requested official Smoke is experimental
+validation, not promotion or evidence of production readiness.
