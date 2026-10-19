@@ -35,7 +35,7 @@ from . import features
 from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
 from .protected_rerank import protected_order
-from .pair_rerank import load_pair_backend, pair_order
+from .pair_rerank import load_pair_backend, pair_order, validate_pair_policy
 from .views import (
     affected_window_starts,
     join_content,
@@ -149,6 +149,8 @@ class RetrieverDB:
                              if self.pair_enabled else None)
         if self.pair_enabled and self.pair_backend is None:
             raise ValueError("pair_rerank requires a pair backend")
+        validate_pair_policy(self.config.pair_rerank_mode,
+                             self.config.pair_rrf_weight, self.config.pair_rrf_k)
         self._pair_lock = threading.RLock()
         self.embedding_enabled = self.dense_enabled or self.semantic_enabled
         self._semantic_cache = OrderedDict()
@@ -845,7 +847,9 @@ class RetrieverDB:
             with self._pair_lock:
                 scores = self.pair_backend.score(
                     query, [r["content"] or "" for r in records[:count]])
-            return pair_order(records, scores, pool=count)
+            return pair_order(records, scores, pool=count,
+                              mode=self.config.pair_rerank_mode,
+                              weight=self.config.pair_rrf_weight, k=self.config.pair_rrf_k)
         except Exception:
             for record in records:
                 record["flags"].append("pair_rerank_fallback")

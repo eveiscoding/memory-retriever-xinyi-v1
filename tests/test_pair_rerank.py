@@ -14,7 +14,7 @@ class PairOrderTests(unittest.TestCase):
     def test_prefix_moves_tail_stable_ties(self):
         result = pair_order(records(), [0, 1, 8, 2, 2], pool=5)
         self.assertEqual([r['id'] for r in result], ['2','3','4','1','0','5','6','7'])
-        self.assertEqual(result[0]['channel_ranks'], {'pre_rerank':3,'post_rerank':1})
+        self.assertEqual(result[0]['channel_ranks'], {'pre_rerank':3,'post_rerank':1,'pair_model':1})
         self.assertNotIn('semantic_score', result[-1])
 
     def test_invalid_scores_atomic(self):
@@ -75,3 +75,33 @@ class PairIntegrationTests(unittest.TestCase):
         self.assertEqual([r.id for r in before.results], [r.id for r in after.results])
         self.assertTrue(all('pair_rerank_fallback' in r.evidence_flags for r in after.results))
         self.assertTrue(all(r.semantic_score is None for r in after.results))
+
+
+class PairFusionTests(unittest.TestCase):
+    def test_zero_weight_retains_baseline_one_matches_pure(self):
+        values = [0, 7, 3, 9, 1, 6, 4, 2]
+        ids = lambda rows: [r['id'] for r in rows]
+        self.assertEqual(ids(pair_order(records(), values, pool=8, mode='rrf', weight=0)),
+                         ids(records()))
+        self.assertEqual(ids(pair_order(records(), values, pool=8, mode='rrf', weight=1)),
+                         ids(pair_order(records(), values, pool=8)))
+
+    def test_fusion_is_invariant_to_logit_scale_and_keeps_pool(self):
+        values = [7, 6, 5, 4, 3, 2, 1, 0]
+        values[0], values[7] = values[7], values[0]
+        a = pair_order(records(), values, pool=8, mode='rrf', weight=.25)
+        b = pair_order(records(), [100*v-70 for v in values], pool=8, mode='rrf', weight=.25)
+        self.assertEqual([r['id'] for r in a], [r['id'] for r in b])
+        self.assertEqual({r['id'] for r in a}, {r['id'] for r in records()})
+        self.assertEqual(a[0]['id'], '1')
+        self.assertIn('pair_rrf', a[0]['flags'])
+
+    def test_invalid_policy_is_rejected_before_mutation(self):
+        for params in ({'mode':'other'}, {'weight':-1}, {'weight':float('nan')},
+                       {'weight':True}, {'k':0}, {'k':float('inf')}):
+            original=records()
+            with self.assertRaises(ValueError):
+                pair_order(original, list(range(8)), pool=8, **params)
+            self.assertEqual(original, records())
+        with self.assertRaises(ValueError):
+            RetrieverConfig(pair_rerank_mode='bad').validate()

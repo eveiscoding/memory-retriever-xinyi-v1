@@ -69,3 +69,45 @@ After this isolated relevance ablation, evaluate generic evidence-set selection
 is not equivalent to answering every event. Time metadata representation follows
 only if evidence shows it is needed; event time must not be replaced with record
 time or invented when unknown. No Phase04/06 implementation is included here.
+
+## Baseline + pair rank fusion (BGE experiment)
+
+`AML_PAIR_RERANK_MODE=model` preserves the pure-model ablation. Set `rrf` for:
+
+```
+F(i) = (1-alpha)/(k+baseline_rank(i)) + alpha/(k+pair_rank(i))
+```
+
+`AML_PAIR_RRF_WEIGHT=0.25` and `AML_PAIR_RRF_K=60` are the predeclared initial
+settings. No gold/query-intent routing or raw-logit calibration is involved.
+All ranks start at one. Stable ties retain baseline order. Alpha=0 reproduces
+baseline order, alpha=1 reproduces model order. The original pool stays fixed;
+this does not guarantee Top5/20 coverage. Diagnostics retain raw `semantic_score`,
+add `channel_ranks.pair_model`, and mark fused results with `pair_rrf`.
+
+The optional `aml_retriever.onnx_pair_backend:create_backend` loads an explicitly
+provisioned local ONNX graph and tokenizer, using CPUExecutionProvider, with no
+remote code or runtime downloads. `AML_PAIR_ONNX_FILE` defaults to
+`onnx/model_int8.onnx`. Provision single-file weights (external tensor files are
+not supported); lock actual artifact hashes, upstream revision, runtime version,
+quantization, context length, batch size and thread count before evaluating.
+
+Initial CPU feasibility candidate: `onnx-community/bge-reranker-v2-m3-ONNX`,
+`onnx/model_int8.onnx`, derived from BAAI/bge-reranker-v2-m3. This is a community
+INT8 conversion, not an original-precision BAAI result. Compare fusion and pure
+order using the identical checkpoint, tokenizer and pair scores. Initial input
+limit remains 512 tokens (only document suffix truncated), batch=1, threads=1;
+this isolates fusion rather than also changing input coverage. The adapter can
+accept explicitly chosen lengths through 8192, but extending context requires a
+new registered experiment and actual model support. Do not extrapolate model-card
+speed or multilingual scores to this machine or dialogue-memory task.
+
+Sources:
+- https://huggingface.co/BAAI/bge-reranker-v2-m3
+- https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX
+- https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+
+Official competition FAQ 05 (checked 2026-10-19) explicitly says rerankers are
+unrestricted; academic embedding is text-embedding-v4 and LLM components are
+gpt-4o-mini. Search must still return evidence rather than generated answers:
+https://agentmemories.ai/competition/

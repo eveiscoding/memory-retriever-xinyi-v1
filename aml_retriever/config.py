@@ -89,6 +89,9 @@ class RetrieverConfig:
     dense_dimension: int = 256
     pair_backend: str = ""
     pair_rerank_pool: int = 100
+    pair_rerank_mode: str = "model"
+    pair_rrf_weight: float = 0.25
+    pair_rrf_k: float = 60.0
     semantic_rerank_pool: int = 100
     semantic_rerank_boundary: int = 20
     semantic_rerank_exact_quota: int = 3
@@ -165,6 +168,9 @@ class RetrieverConfig:
             "AML_DENSE_DIMENSION": ("dense_dimension", int),
             "AML_PAIR_BACKEND": ("pair_backend", str),
             "AML_PAIR_RERANK_POOL": ("pair_rerank_pool", int),
+            "AML_PAIR_RERANK_MODE": ("pair_rerank_mode", str),
+            "AML_PAIR_RRF_WEIGHT": ("pair_rrf_weight", float),
+            "AML_PAIR_RRF_K": ("pair_rrf_k", float),
             "AML_SEMANTIC_RERANK_POOL": ("semantic_rerank_pool", int),
             "AML_SEMANTIC_RERANK_BOUNDARY": ("semantic_rerank_boundary", int),
             "AML_SEMANTIC_RERANK_EXACT_QUOTA": ("semantic_rerank_exact_quota", int),
@@ -225,6 +231,8 @@ class RetrieverConfig:
             raise ValueError("dense_dimension must be at least 8")
         if not 1 <= self.semantic_rerank_boundary <= self.semantic_rerank_pool <= self.top_k_max:
             raise ValueError("semantic rerank requires 1 <= boundary <= pool <= top_k_max")
+        from .pair_rerank import validate_pair_policy
+        validate_pair_policy(self.pair_rerank_mode, self.pair_rrf_weight, self.pair_rrf_k)
         if not 1 <= self.pair_rerank_pool <= self.top_k_max:
             raise ValueError("pair rerank pool must be between 1 and top_k_max")
         if self.flags.get("pair_rerank") and self.flags.get("semantic_rerank"):
