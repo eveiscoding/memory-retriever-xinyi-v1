@@ -35,6 +35,8 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "use_options": True, # Search 的 options 字段参与候选召回
     "exact_scan": False, # FTS 无命中时的兜底 LIKE 全扫（代价高，默认关闭）
     "vector": False,     # dense 候选通道；还需显式配置 dense_backend
+    "pair_top20_protect": False,  # preserve baseline Top20 membership only
+    "pair_exact_protect": False,  # pin up to 3 diverse exact evidence slots
     "pair_rerank": False,  # query/document cross-encoder, experimental
     "semantic_rerank": False,  # 冻结原召回集合后，用 embedding 分桶重排（实验）
     # 覆写检测（supersession）：在候选集内找「话题高度重合但更晚」的消息对，
@@ -232,7 +234,9 @@ class RetrieverConfig:
         if not 1 <= self.semantic_rerank_boundary <= self.semantic_rerank_pool <= self.top_k_max:
             raise ValueError("semantic rerank requires 1 <= boundary <= pool <= top_k_max")
         from .pair_rerank import validate_pair_policy
-        validate_pair_policy(self.pair_rerank_mode, self.pair_rrf_weight, self.pair_rrf_k)
+        validate_pair_policy(self.pair_rerank_mode, self.pair_rrf_weight, self.pair_rrf_k,
+                             protect_top20=self.flags.get("pair_top20_protect", False),
+                             protect_exact=self.flags.get("pair_exact_protect", False))
         if not 1 <= self.pair_rerank_pool <= self.top_k_max:
             raise ValueError("pair rerank pool must be between 1 and top_k_max")
         if self.flags.get("pair_rerank") and self.flags.get("semantic_rerank"):

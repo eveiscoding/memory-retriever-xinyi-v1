@@ -105,3 +105,51 @@ class PairFusionTests(unittest.TestCase):
             self.assertEqual(original, records())
         with self.assertRaises(ValueError):
             RetrieverConfig(pair_rerank_mode='bad').validate()
+
+
+class PairProtectionTests(unittest.TestCase):
+    def rows(self):
+        return [dict(id=str(i),content='record '+str(i),flags=[],source_ids=['s'+str(i)],channel_ranks={}) for i in range(25)]
+
+    def test_top20_membership_is_fixed_but_internal_order_is_free(self):
+        rows=self.rows();rows[0]['flags']=['date']
+        result=pair_order(rows,range(25),pool=25,protect_top20=True)
+        self.assertEqual([r['id'] for r in result],list(map(str,range(19,-1,-1)))+list(map(str,range(24,19,-1))))
+        self.assertFalse(any('pair_exact_anchor' in r['flags'] for r in result))
+
+    def test_exact_only_deduplicates_anchors_but_allows_top20_crossing(self):
+        rows=self.rows()
+        for i in range(5):rows[i]['flags']=['date']
+        rows[1]['source_ids']=rows[0]['source_ids'];rows[2]['content']=rows[0]['content']
+        result=pair_order(rows,range(25),pool=25,protect_exact=True,query='2026')
+        self.assertEqual([r['id'] for r in result if 'pair_exact_anchor' in r['flags']],['0','3','4'])
+        for i in (0,3,4):self.assertEqual(result[i]['id'],str(i))
+        self.assertIn('24',[r['id'] for r in result[:20]])
+        self.assertFalse(any('pair_top20_protect' in r['flags'] for r in result))
+
+    def test_unrelated_entity_flag_cannot_reserve_a_slot(self):
+        rows=self.rows();rows[0]['flags']=['entity'];rows[0]['content']='How unrelated'
+        result=pair_order(rows,range(25),pool=25,protect_exact=True,query='Which museum?')
+        self.assertFalse(any('pair_exact_anchor' in r['flags'] for r in result))
+        self.assertEqual(result[0]['id'],'24')
+
+    def test_invalid_policy_or_scores_fail_before_mutation(self):
+        for opts,values in [({'protect_top20':True},[0]*24+[math.nan]),({'protect_exact':True,'mode':'rrf'},list(range(25)))]:
+            rows=self.rows();before=copy.deepcopy(rows)
+            with self.assertRaises(ValueError):pair_order(rows,values,pool=25,**opts)
+            self.assertEqual(rows,before)
+        with self.assertRaises(ValueError):RetrieverConfig(pair_rerank_mode='rrf').with_flags(pair_top20_protect=True).validate()
+
+    def test_env_switches_and_actual_retriever_propagation(self):
+        from unittest.mock import patch
+        with patch.dict('os.environ',{'AML_FLAG_PAIR_TOP20_PROTECT':'1','AML_FLAG_PAIR_EXACT_PROTECT':'0'}):cfg=RetrieverConfig.from_env().validate()
+        self.assertTrue(cfg.flags['pair_top20_protect']);self.assertFalse(cfg.flags['pair_exact_protect'])
+        db=RetrieverDB(cfg.with_flags(pair_rerank=True),pair_backend=Backend())
+        try:
+            for i in range(25):db.add(user_id='u',session_id=str(i),request_id=str(i),messages=[dict(role='user',content='museum '+str(i))])
+            db.pair_enabled=False;before=db.search(user_id='u',query='museum',top_k=100)
+            db.pair_enabled=True;after=db.search(user_id='u',query='museum',top_k=100)
+            self.assertEqual({r.id for r in before.results[:20]},{r.id for r in after.results[:20]})
+            self.assertTrue(all('pair_top20_protect' in r.evidence_flags for r in after.results))
+            self.assertFalse(any('pair_rerank_fallback' in r.evidence_flags for r in after.results))
+        finally:db.close()

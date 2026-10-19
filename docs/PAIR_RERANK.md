@@ -136,3 +136,24 @@ Check queue latency against client timeouts before enabling the endpoint.
 The offline public-data trial had case regressions and failed the strict
 no-regression gate. An explicitly requested official Smoke is experimental
 validation, not promotion or evidence of production readiness.
+
+## Independent protection ablations
+
+With pure `AML_PAIR_RERANK_MODE=model`, two independent flags default to off:
+
+- `AML_FLAG_PAIR_TOP20_PROTECT=1`: preserve baseline Top20 membership and the
+  remaining pool membership separately; MiniLM still reorders within each bucket.
+  This does not freeze the prefix order or add a Top5 boundary.
+- `AML_FLAG_PAIR_EXACT_PROTECT=1`: pin at most 3 qualifying baseline positions
+  across the complete scored pool, using the existing exact/phrase/entity/date/
+  number signals, filtered query entities and distinct source/content anchors.
+  All other positions remain free, including movement across rank 20.
+
+These signals indicate potential evidence, not correctness or factual entailment.
+The exact flag reuses existing generic protection qualification; no benchmark
+labels, gold answers, question IDs or new query-specific rules are consulted.
+Both flags are rejected with pair RRF to keep model scoring and fusion separate.
+They can be combined in code, but the initial experiment compares baseline,
+pure MiniLM, Top20 only, and exact only, with no combined arm or weight sweep.
+Model input, artifact hash, truncation, returned pool and raw logits stay fixed.
+Diagnostics add `pair_top20_protect`, `pair_exact_protect`, and `pair_exact_anchor`.

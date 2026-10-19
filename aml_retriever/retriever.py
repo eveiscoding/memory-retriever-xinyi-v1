@@ -150,7 +150,9 @@ class RetrieverDB:
         if self.pair_enabled and self.pair_backend is None:
             raise ValueError("pair_rerank requires a pair backend")
         validate_pair_policy(self.config.pair_rerank_mode,
-                             self.config.pair_rrf_weight, self.config.pair_rrf_k)
+                             self.config.pair_rrf_weight, self.config.pair_rrf_k,
+                             protect_top20=self.flags.get("pair_top20_protect", False),
+                             protect_exact=self.flags.get("pair_exact_protect", False))
         self._pair_lock = threading.RLock()
         self.embedding_enabled = self.dense_enabled or self.semantic_enabled
         self._semantic_cache = OrderedDict()
@@ -849,7 +851,10 @@ class RetrieverDB:
                     query, [r["content"] or "" for r in records[:count]])
             return pair_order(records, scores, pool=count,
                               mode=self.config.pair_rerank_mode,
-                              weight=self.config.pair_rrf_weight, k=self.config.pair_rrf_k)
+                              weight=self.config.pair_rrf_weight, k=self.config.pair_rrf_k,
+                              protect_top20=self.flags.get("pair_top20_protect", False),
+                              protect_exact=self.flags.get("pair_exact_protect", False),
+                              query=query)
         except Exception:
             for record in records:
                 record["flags"].append("pair_rerank_fallback")

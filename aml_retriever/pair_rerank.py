@@ -4,6 +4,9 @@ from __future__ import annotations
 import importlib
 import math
 
+from .features import extract_protection_entities
+from .protected_rerank import _diverse_anchors
+
 
 def load_pair_backend(spec):
     if not spec:
@@ -17,7 +20,11 @@ def load_pair_backend(spec):
     return backend
 
 
-def validate_pair_policy(mode, weight, k):
+def validate_pair_policy(mode, weight, k, *, protect_top20=False, protect_exact=False):
+    if not isinstance(protect_top20, bool) or not isinstance(protect_exact, bool):
+        raise ValueError("pair protection switches must be boolean")
+    if mode != "model" and (protect_top20 or protect_exact):
+        raise ValueError("pair protection ablations require pure model ordering")
     if mode not in {"model", "rrf"}:
         raise ValueError("pair mode must be model or rrf")
     if (isinstance(weight, bool) or not math.isfinite(weight) or not 0 <= weight <= 1
@@ -25,13 +32,18 @@ def validate_pair_policy(mode, weight, k):
         raise ValueError("pair RRF requires finite weight in [0,1] and positive k")
 
 
-def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0):
+def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
+               protect_top20=False, protect_exact=False, query=""):
     """Reorder a fixed returned pool; malformed scores leave all records untouched.
 
-    No Top5/20 membership or rank guarantee: these are empirical quality gates.
+    Protection switches are independent, off by default and only valid in model
+    mode. Top20 protection freezes membership, not within-bucket ranks. Exact
+    protection pins up to 3 diverse baseline slots across the whole scored pool.
+    Neither guarantees correctness, Top5 coverage, or a retrieval improvement.
     Baseline scores remain diagnostic; consumers must respect returned order.
     """
-    validate_pair_policy(mode, weight, k)
+    validate_pair_policy(mode, weight, k, protect_top20=protect_top20,
+                         protect_exact=protect_exact)
     count = min(pool, len(records))
     scores = list(scores)
     if len(scores) != count or any(isinstance(s, bool) for s in scores):
@@ -47,6 +59,19 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0):
         fused = [(1 - weight) / (k + i + 1) + weight / (k + model_rank[i])
                  for i in range(count)]
         order = sorted(range(count), key=lambda i: (-fused[i], i))
+    anchors = set()
+    if protect_top20 or protect_exact:
+        if protect_exact:
+            entities = ([entity.lower() for entity in extract_protection_entities(query)]
+                        if query else None)
+            anchors = set(_diverse_anchors(records, range(count), 3, entities))
+        cuts = [0, min(20, count), count] if protect_top20 else [0, count]
+        order = list(range(count))
+        for start, end in zip(cuts, cuts[1:]):
+            movable = [i for i in range(start, end) if i not in anchors]
+            ranked = sorted(movable, key=lambda i: (-scores[i], i))
+            for target, source in zip(movable, ranked):
+                order[target] = source
     output = [records[i] for i in order] + records[count:]
     for rank, source in enumerate(order, 1):
         record = records[source]
@@ -55,6 +80,12 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0):
         record["channel_ranks"]["pair_model"] = model_rank[source]
         record["semantic_score"] = scores[source]
         record["flags"].append("pair_rerank")
+        if protect_top20:
+            record["flags"].append("pair_top20_protect")
+        if protect_exact:
+            record["flags"].append("pair_exact_protect")
+        if source in anchors:
+            record["flags"].append("pair_exact_anchor")
         if mode == "rrf":
             record["flags"].append("pair_rrf")
     return output
