@@ -25,11 +25,11 @@ def validate_pair_policy(mode, weight, k, *, protect_top20=False, protect_exact=
         raise ValueError("pair protection switches must be boolean")
     if mode != "model" and (protect_top20 or protect_exact):
         raise ValueError("pair protection ablations require pure model ordering")
-    if mode not in {"model", "rrf"}:
-        raise ValueError("pair mode must be model or rrf")
+    if mode not in {"model", "rrf", "cc"}:
+        raise ValueError("pair mode must be model, rrf, or cc")
     if (isinstance(weight, bool) or not math.isfinite(weight) or not 0 <= weight <= 1
             or isinstance(k, bool) or not math.isfinite(k) or k <= 0):
-        raise ValueError("pair RRF requires finite weight in [0,1] and positive k")
+        raise ValueError("pair fusion requires finite weight in [0,1] and positive k")
 
 
 def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
@@ -57,6 +57,34 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
         # Rank fusion avoids treating RRF baseline scores and logits as a common
         # numeric scale. All queries use the same fixed policy; no intent routing.
         fused = [(1 - weight) / (k + i + 1) + weight / (k + model_rank[i])
+                 for i in range(count)]
+        order = sorted(range(count), key=lambda i: (-fused[i], i))
+    elif mode == "cc":
+        # Preserve within-query score gaps without treating either channel as a
+        # calibrated probability. ``score`` is the baseline pipeline's final
+        # RRF score, not an original feature score. A constant channel carries
+        # no discrimination and therefore normalizes to zero for every item.
+        baseline = []
+        for record in records[:count]:
+            value = record.get("score")
+            if isinstance(value, bool):
+                raise ValueError("invalid baseline score type")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("non-finite baseline score")
+            baseline.append(value)
+
+        def minmax(values):
+            if not values:
+                return []
+            low, high = min(values), max(values)
+            if high == low:
+                return [0.0] * len(values)
+            return [(value - low) / (high - low) for value in values]
+
+        baseline_norm = minmax(baseline)
+        model_norm = minmax(scores)
+        fused = [(1 - weight) * baseline_norm[i] + weight * model_norm[i]
                  for i in range(count)]
         order = sorted(range(count), key=lambda i: (-fused[i], i))
     anchors = set()
@@ -88,4 +116,6 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
             record["flags"].append("pair_exact_anchor")
         if mode == "rrf":
             record["flags"].append("pair_rrf")
+        elif mode == "cc":
+            record["flags"].append("pair_cc")
     return output

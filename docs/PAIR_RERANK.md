@@ -85,6 +85,31 @@ baseline order, alpha=1 reproduces model order. The original pool stays fixed;
 this does not guarantee Top5/20 coverage. Diagnostics retain raw `semantic_score`,
 add `channel_ranks.pair_model`, and mark fused results with `pair_rrf`.
 
+## Normalized score convex combination
+
+Set `AML_PAIR_RERANK_MODE=cc` to compare rank fusion with a score-gap-preserving
+alternative over the same fixed pool and pair logits:
+
+```
+F(i) = (1-alpha) * minmax(baseline_score(i))
+     + alpha * minmax(pair_logit(i))
+```
+
+Normalization is per query and per scored candidate pool. `baseline_score` is
+the existing pipeline's final baseline RRF score, not an original feature score;
+the pair value remains an uncalibrated raw model logit. This mode does not treat
+either input as a cross-query probability. `AML_PAIR_RRF_WEIGHT` is the shared
+alpha knob for mutually exclusive `rrf` and `cc` experiments; `AML_PAIR_RRF_K`
+is ignored by `cc` but still validated for configuration consistency.
+
+A constant channel normalizes to all zero and contributes no discrimination. If
+both channels are constant, stable ties preserve baseline order. Missing,
+non-numeric, boolean, NaN, or infinite scores fail the whole rerank and trigger
+the existing untouched-baseline fallback. Equal fused scores retain baseline
+order. The returned membership remains fixed and no Top20/exact protection can
+be combined with this mode. Diagnostics retain the raw `semantic_score`, model
+rank, and mark successful results with `pair_cc`.
+
 The optional `aml_retriever.onnx_pair_backend:create_backend` loads an explicitly
 provisioned local ONNX graph and tokenizer, using CPUExecutionProvider, with no
 remote code or runtime downloads. `AML_PAIR_ONNX_FILE` defaults to

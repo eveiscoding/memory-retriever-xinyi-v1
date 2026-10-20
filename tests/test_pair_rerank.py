@@ -76,6 +76,15 @@ class PairIntegrationTests(unittest.TestCase):
         self.assertTrue(all('pair_rerank_fallback' in r.evidence_flags for r in after.results))
         self.assertTrue(all(r.semantic_score is None for r in after.results))
 
+    def test_cc_runs_through_retriever_with_baseline_scores(self):
+        self.db.config.pair_rerank_mode = 'cc'
+        self.db.config.pair_rrf_weight = .5
+        result = self.db.search(user_id='alice', query='Museum', top_k=100)
+        self.assertTrue(all('pair_cc' in row.evidence_flags for row in result.results))
+        self.assertFalse(any('pair_rerank_fallback' in row.evidence_flags
+                             for row in result.results))
+        self.assertTrue(all(row.semantic_score is not None for row in result.results))
+
 
 class PairFusionTests(unittest.TestCase):
     def test_zero_weight_retains_baseline_one_matches_pure(self):
@@ -105,6 +114,58 @@ class PairFusionTests(unittest.TestCase):
             self.assertEqual(original, records())
         with self.assertRaises(ValueError):
             RetrieverConfig(pair_rerank_mode='bad').validate()
+
+
+class PairScoreFusionTests(unittest.TestCase):
+    def rows(self, baseline):
+        rows = records()
+        for row, score in zip(rows, baseline):
+            row['score'] = score
+        return rows
+
+    def test_weight_endpoints_match_baseline_and_model_order(self):
+        baseline = [8, 7, 6, 5, 4, 3, 2, 1]
+        model = [0, 1, 2, 3, 4, 5, 6, 7]
+        ids = lambda rows: [row['id'] for row in rows]
+        self.assertEqual(ids(pair_order(self.rows(baseline), model, pool=8,
+                                        mode='cc', weight=0)),
+                         list(map(str, range(8))))
+        self.assertEqual(ids(pair_order(self.rows(baseline), model, pool=8,
+                                        mode='cc', weight=1)),
+                         list(map(str, range(7, -1, -1))))
+
+    def test_minmax_preserves_score_gap_that_rank_fusion_discards(self):
+        baseline = [100, 99, 1, 0, -1, -2, -3, -4]
+        model = [0, 1, 8, 7, 6, 5, 4, 3]
+        cc = pair_order(self.rows(baseline), model, pool=8, mode='cc', weight=.25)
+        rrf = pair_order(self.rows(baseline), model, pool=8, mode='rrf', weight=.25)
+        self.assertEqual(cc[0]['id'], '1')
+        self.assertEqual(rrf[0]['id'], '2')
+        self.assertIn('pair_cc', cc[0]['flags'])
+        self.assertNotIn('pair_rrf', cc[0]['flags'])
+
+    def test_constant_channels_have_no_artificial_discrimination(self):
+        model = [0, 1, 2, 3, 4, 5, 6, 7]
+        only_model = pair_order(self.rows([5] * 8), model, pool=8,
+                                mode='cc', weight=.5)
+        self.assertEqual([row['id'] for row in only_model],
+                         list(map(str, range(7, -1, -1))))
+        both_constant = pair_order(self.rows([5] * 8), [9] * 8, pool=8,
+                                   mode='cc', weight=.5)
+        self.assertEqual([row['id'] for row in both_constant],
+                         list(map(str, range(8))))
+
+    def test_bad_baseline_scores_fail_atomically(self):
+        for bad in (None, True, math.nan, math.inf, 'bad'):
+            rows = self.rows([8, 7, 6, 5, 4, 3, 2, 1])
+            rows[3]['score'] = bad
+            before = copy.deepcopy(rows)
+            with self.assertRaises((ValueError, TypeError)):
+                pair_order(rows, list(range(8)), pool=8, mode='cc')
+            self.assertEqual(rows, before)
+
+    def test_cc_configuration_accepts_shared_alpha(self):
+        RetrieverConfig(pair_rerank_mode='cc', pair_rrf_weight=.75).validate()
 
 
 class PairProtectionTests(unittest.TestCase):
