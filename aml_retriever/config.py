@@ -94,6 +94,7 @@ class RetrieverConfig:
     pair_rerank_mode: str = "model"
     # Alpha for pair rank fusion (rrf) or normalized score convex combination
     # (cc). The shared knob keeps the two mutually exclusive ablations aligned.
+    # cc3 fixes BM25/rules/model to 1/3 each; it ignores this alpha and pair k.
     pair_rrf_weight: float = 0.25
     pair_rrf_k: float = 60.0
     semantic_rerank_pool: int = 100

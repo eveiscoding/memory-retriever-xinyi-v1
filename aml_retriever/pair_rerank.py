@@ -25,8 +25,8 @@ def validate_pair_policy(mode, weight, k, *, protect_top20=False, protect_exact=
         raise ValueError("pair protection switches must be boolean")
     if mode != "model" and (protect_top20 or protect_exact):
         raise ValueError("pair protection ablations require pure model ordering")
-    if mode not in {"model", "rrf", "cc"}:
-        raise ValueError("pair mode must be model, rrf, or cc")
+    if mode not in {"model", "rrf", "cc", "cc3"}:
+        raise ValueError("pair mode must be model, rrf, cc, or cc3")
     if (isinstance(weight, bool) or not math.isfinite(weight) or not 0 <= weight <= 1
             or isinstance(k, bool) or not math.isfinite(k) or k <= 0):
         raise ValueError("pair fusion requires finite weight in [0,1] and positive k")
@@ -53,6 +53,7 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
         raise ValueError("non-finite pair score")
     order = sorted(range(count), key=lambda i: (-scores[i], i))
     model_rank = {source: rank for rank, source in enumerate(order, 1)}
+    diagnostics = None
     if mode == "rrf":
         # Rank fusion avoids treating RRF baseline scores and logits as a common
         # numeric scale. All queries use the same fixed policy; no intent routing.
@@ -87,6 +88,37 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
         fused = [(1 - weight) * baseline_norm[i] + weight * model_norm[i]
                  for i in range(count)]
         order = sorted(range(count), key=lambda i: (-fused[i], i))
+    elif mode == "cc3":
+        # These are pre-RRF component scores, not the already-fused baseline.
+        channels = {"bm25": [], "rule": [], "model": scores}
+        for record in records[:count]:
+            for name in ("bm25", "rule"):
+                value = record[f"cc3_{name}_score"]
+                if isinstance(value, bool):
+                    raise ValueError(f"invalid {name} score type")
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(f"non-finite {name} score")
+                channels[name].append(value)
+
+        def normalize(values):
+            if not values or max(values) == min(values):
+                return [0.0] * len(values)
+            # Scaling first also avoids overflow for extreme finite inputs.
+            scale = max(abs(value) for value in values)
+            scaled = [value / scale for value in values]
+            low, high = min(scaled), max(scaled)
+            return [(value - low) / (high - low) for value in scaled]
+
+        normalized = {name: normalize(values) for name, values in channels.items()}
+        fused = [sum(normalized[name][i] for name in channels) / 3.0
+                 for i in range(count)]
+        order = sorted(range(count), key=lambda i: (-fused[i], i))
+        diagnostics = [dict(
+            **{f"{name}_raw": values[i] for name, values in channels.items()},
+            **{name: values[i] for name, values in normalized.items()},
+            fused=fused[i],
+        ) for i in range(count)]
     anchors = set()
     if protect_top20 or protect_exact:
         if protect_exact:
@@ -118,4 +150,7 @@ def pair_order(records, scores, *, pool, mode="model", weight=0.25, k=60.0,
             record["flags"].append("pair_rrf")
         elif mode == "cc":
             record["flags"].append("pair_cc")
+        elif mode == "cc3":
+            record["flags"].append("pair_cc3")
+            record["fusion_scores"] = diagnostics[source]
     return output

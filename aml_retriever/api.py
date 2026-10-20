@@ -270,6 +270,8 @@ class MemoryService:
             item["channel_ranks"] = evidence.channel_ranks
             if evidence.semantic_score is not None:
                 item["semantic_score"] = evidence.semantic_score
+            if evidence.fusion_scores:
+                item["fusion_scores"] = evidence.fusion_scores
         return item
 
     def __enter__(self):

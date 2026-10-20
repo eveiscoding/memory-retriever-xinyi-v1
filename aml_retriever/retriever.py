@@ -85,6 +85,7 @@ class Evidence:
     evidence_flags: list[str] = field(default_factory=list)
     channel_ranks: dict[str, int] = field(default_factory=dict)
     semantic_score: float | None = None
+    fusion_scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -794,6 +795,17 @@ class RetrieverDB:
             return SearchResult(request_id=request_id, total=0, results=[])
 
         scored = self._score(records, query, tokens, rank_map)
+        if self.pair_enabled and self.config.pair_rerank_mode == "cc3":
+            # Recompute rules without BM25, including governance's bounded pair
+            # selection. Subtracting a lexical term after scoring would still
+            # leave BM25 influencing which supersession pairs were considered.
+            rules = self._score([dict(record) for record in scored], query, tokens, {})
+            rule_by_id = {record["id"]: record["score"] for record in rules}
+            for record in scored:
+                # FTS5 ranks are negative (lower is better). A non-FTS candidate
+                # or LIKE fallback has no lexical evidence, represented by zero.
+                record["cc3_bm25_score"] = -float(rank_map.get(record["id"], 0.0))
+                record["cc3_rule_score"] = rule_by_id[record["id"]]
         # Candidate membership is independent; the deterministic channel's
         # internal rank uses the complete deterministic scorer so existing
         # temporal/update protections remain effective.
@@ -834,6 +846,7 @@ class RetrieverDB:
                 evidence_flags=r["flags"],
                 channel_ranks=r["channel_ranks"],
                 semantic_score=r.get("semantic_score"),
+                fusion_scores=r.get("fusion_scores", {}),
             )
             for r in final
         ]

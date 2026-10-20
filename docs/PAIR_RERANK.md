@@ -110,6 +110,49 @@ order. The returned membership remains fixed and no Top20/exact protection can
 be combined with this mode. Diagnostics retain the raw `semantic_score`, model
 rank, and mark successful results with `pair_cc`.
 
+## Equal-weight three-channel convex combination
+
+Set `AML_PAIR_RERANK_MODE=cc3` (example: `config.mminilm-cc3.env.example`):
+
+```
+F(i) = (minmax(bm25(i)) + minmax(rule(i)) + minmax(pair_logit(i))) / 3
+```
+
+This is a separate mode; historical `cc`, `rrf`, and `model` behavior is retained.
+The three coefficients are fixed at 1/3, not selected from the RRF alpha setting.
+Shared alpha/k are ignored here but still validated as finite valid configuration.
+Baseline recall, candidate fusion, deduplication and message-slot selection run
+unchanged first. Only the returned fixed pool (up to 100) is reordered; dense
+recall remains excluded in pair mode, as before. This does not rebalance recall
+or guarantee the baseline Top5/20 membership.
+
+BM25 is the negated raw FTS5 rank (larger is better), with zero for candidates
+without an FTS hit or from the LIKE fallback. The rule channel is recomputed on
+copies of the same pre-fusion candidate records with an empty BM25 rank map.
+This retains coverage, exact/entity/date/number, recency, conflict, preference,
+and supersession rules, but excludes the BM25 numeric contribution. Crucially,
+bounded supersession pair selection also uses the BM25-free rule scores; merely
+subtracting BM25 after governance would not remove that dependence. Query options
+and the baseline candidate population are unchanged. Rule overlap features may
+still correlate with BM25; equal coefficients do not imply independent signals
+or equal statistical influence.
+
+Normalization is independently per query and scored pool, with constant channels
+mapped to zero. A missing/boolean/nonfinite/malformed component rejects the entire
+rerank and uses the existing baseline fallback. Stable ties retain baseline order;
+an unscored tail is not changed. No Top20/exact protection can be combined with cc3.
+The ordinary `score` retains the baseline diagnostic value and consumers must use
+returned order. With provenance enabled, `fusion_scores` exposes raw
+`bm25_raw/rule_raw/model_raw`, normalized `bm25/rule/model`, and `fused`;
+`semantic_score` remains the raw model logit. Successful rows carry `pair_cc3`.
+Provenance disabled omits all fusion diagnostics from the official response.
+
+Equal weights are an experimental policy, not an established quality improvement.
+Compare fixed public cases and model logits against baseline, RRF and the previous
+two-channel CC. Previously inspected cases are development/regression material,
+not new holdout. No official Smoke/Full or production change follows automatically
+from enabling this local experiment.
+
 The optional `aml_retriever.onnx_pair_backend:create_backend` loads an explicitly
 provisioned local ONNX graph and tokenizer, using CPUExecutionProvider, with no
 remote code or runtime downloads. `AML_PAIR_ONNX_FILE` defaults to
