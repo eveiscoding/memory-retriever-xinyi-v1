@@ -14,6 +14,9 @@ It does not generate final answers.
 An opt-in [fact-extraction pipeline](docs/FACT_EXTRACTION.md) stores cited,
 derived facts alongside raw evidence. It currently provides logic and validation
 only, with no built-in model, and does not change retrieval.
+Separate [time/version and complementary-recall experiments](docs/TEMPORAL_COMPLEMENTARY_RECALL.md)
+add explicit bitemporal annotations and independently testable retrieval routes;
+both are disabled by default and have no model-quality claim.
 
 Cross-branch HTTP benchmarks are maintained separately in the private
 [memory-retriever-xinyi-benchmarks](https://github.com/eveiscoding/memory-retriever-xinyi-benchmarks)

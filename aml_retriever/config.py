@@ -12,6 +12,12 @@ from dataclasses import dataclass, field, asdict
 # 检索增强开关。每一项都可独立关闭，用于消融实验。
 # 默认值只反映"当前有离线证据支持"的配置，无证据的一律默认关闭。
 DEFAULT_FLAGS: dict[str, bool] = {
+    "fact_versions": False,  # explicit world-time/knowledge-time sidecar
+    "complementary_recall": False,
+    "fact_recall_keyword": True,  # channel masks; inactive unless master enabled
+    "fact_recall_graph": True,
+    "fact_recall_temporal": True,
+    "fact_recall_semantic": True,
     "fact_extraction": False,  # additive shadow facts; raw evidence/search unchanged
     "views": True,       # 聚合视图（window / session-segment）参与检索
     "exact": True,       # 精确子串 / token 覆盖率加权
@@ -92,6 +98,12 @@ class RetrieverConfig:
     fact_backend: str = ""
     fact_max_input_chars: int = 16000
     fact_max_facts: int = 32
+    fact_recall_scan_limit: int = 1000
+    fact_recall_channel_limit: int = 50
+    fact_recall_graph_hops: int = 2
+    fact_recall_embed_chars: int = 64000
+    fact_recall_rrf_k: int = 60
+    fact_recall_weight: float = 0.1
     dense_dimension: int = 256
     pair_backend: str = ""
     pair_rerank_pool: int = 100
@@ -177,6 +189,12 @@ class RetrieverConfig:
             "AML_FACT_BACKEND": ("fact_backend", str),
             "AML_FACT_MAX_INPUT_CHARS": ("fact_max_input_chars", int),
             "AML_FACT_MAX_FACTS": ("fact_max_facts", int),
+            "AML_FACT_RECALL_SCAN_LIMIT": ("fact_recall_scan_limit", int),
+            "AML_FACT_RECALL_CHANNEL_LIMIT": ("fact_recall_channel_limit", int),
+            "AML_FACT_RECALL_GRAPH_HOPS": ("fact_recall_graph_hops", int),
+            "AML_FACT_RECALL_EMBED_CHARS": ("fact_recall_embed_chars", int),
+            "AML_FACT_RECALL_RRF_K": ("fact_recall_rrf_k", int),
+            "AML_FACT_RECALL_WEIGHT": ("fact_recall_weight", float),
             "AML_DENSE_DIMENSION": ("dense_dimension", int),
             "AML_PAIR_BACKEND": ("pair_backend", str),
             "AML_PAIR_RERANK_POOL": ("pair_rerank_pool", int),
@@ -224,6 +242,8 @@ class RetrieverConfig:
         """Fail closed on unsafe or ambiguous production configuration."""
         if not 1 <= self.fact_max_input_chars <= 1000000 or not 1 <= self.fact_max_facts <= 256:
             raise ValueError("fact input/fact limits are out of range")
+        from .complementary_recall import validate_config
+        validate_config(self)
         mode = (self.auth_mode or "none").strip().lower()
         if mode not in {"none", "bearer", "token", "x-api-key"}:
             raise ValueError("auth_mode must be one of: none, bearer, token, x-api-key")

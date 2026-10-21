@@ -272,6 +272,8 @@ class MemoryService:
                 item["semantic_score"] = evidence.semantic_score
             if evidence.fusion_scores:
                 item["fusion_scores"] = evidence.fusion_scores
+            if evidence.recall_status:
+                item["recall_status"] = evidence.recall_status
         return item
 
     def __enter__(self):

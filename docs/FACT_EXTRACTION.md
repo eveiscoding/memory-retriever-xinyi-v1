@@ -19,8 +19,9 @@ irrelevant-input filtering; we do not implement Mem0's complete memory system.
   fails, returns no facts, or exceeds the input budget. Database write errors still
   roll back the entire Add rather than acknowledging a partial write.
 - Facts live in separate `facts`, `fact_sources`, and `fact_extractions` tables.
-  They are **not** indexed in FTS or vectors, fed to RRF, or exposed by Search.
-  Thus this stage supports storage/audit, not improved fact retrieval yet.
+  A separate fact FTS supports the independently gated
+  [time/version and complementary-recall stage](TEMPORAL_COMPLEMENTARY_RECALL.md).
+  Extraction alone does not feed facts to RRF or expose them through Search.
 - `db.list_facts(user_id=..., limit=100)` is an internal scoped audit method.
   It returns derived text plus original message IDs, exact quotes, roles, source
   timestamps, session IDs, and request IDs. There is no new HTTP route.
@@ -105,4 +106,5 @@ Fixtures are simulated structured output, not model-quality evidence.
 Next: select and authorize a generation backend; assess extraction precision,
 coverage, citation entailment, speaker/subject errors and cost on locked public
 data; only then consider a separately gated fact recall channel. Time/version
-management and complementary recall are subsequent independent stages.
+management and complementary recall have independent logic-only implementations;
+their feature gates remain off pending functional and real-model effect checks.

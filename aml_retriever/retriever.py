@@ -35,6 +35,7 @@ from . import features
 from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
 from .facts import PROMPT_VERSION, extract_facts, fact_id, load_fact_backend, validate_backend
+from . import temporal_facts, complementary_recall
 from .protected_rerank import protected_order
 from .pair_rerank import load_pair_backend, pair_order, validate_pair_policy
 from .views import (
@@ -89,6 +90,7 @@ class Evidence:
     channel_ranks: dict[str, int] = field(default_factory=dict)
     semantic_score: float | None = None
     fusion_scores: dict[str, float] = field(default_factory=dict)
+    recall_status: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -136,6 +138,8 @@ class RetrieverDB:
             self.config.db_path = db_path
         self.db_path = self.config.db_path
         self.flags = dict(self.config.flags)
+        if self.flags.get("complementary_recall", False):
+            complementary_recall.validate_config(self.config)
         self.facts_enabled = bool(self.flags.get("fact_extraction", False))
         self.fact_backend = None
         self._fact_lock = threading.RLock()
@@ -184,6 +188,10 @@ class RetrieverDB:
             self._shared_mem_con = self._new_connection()
 
         self._init_schema()
+        self._write(temporal_facts.init_schema)
+        self._write(complementary_recall.init_schema)
+        if self.flags.get("complementary_recall", False):
+            self._write(self._sync_fact_fts)
         if self.embedding_enabled:
             self._synchronize_embedding_index()
 
@@ -596,8 +604,10 @@ class RetrieverDB:
         if fact_batch is not None:
             for fact in fact_batch.facts:
                 fid = fact_id(user_id, fact.source_role, fact.text)
-                con.execute("INSERT OR IGNORE INTO facts VALUES(?,?,?,?,?,?)",
-                    (fid, user_id, fact.text, fact.kind, fact.source_role, now))
+                inserted = con.execute("INSERT OR IGNORE INTO facts VALUES(?,?,?,?,?,?)",
+                    (fid, user_id, fact.text, fact.kind, fact.source_role, now)).rowcount
+                if inserted:
+                    con.execute("INSERT INTO fact_fts VALUES(?,?,?)", (features.index_text(fact.text), fid, user_id))
                 for index, quote in fact.sources:
                     con.execute("INSERT OR IGNORE INTO fact_sources VALUES(?,?,?,?)",
                                 (fid, user_id, new_ids[index], quote))
@@ -635,6 +645,56 @@ class RetrieverDB:
                     "WHERE s.user_id=? AND s.fact_id=? ORDER BY s.message_id,s.quote",
                     (user_id, fact["fact_id"]))]
             return facts
+
+    def record_fact_version(self, **kwargs) -> dict:
+        """Explicit internal annotation, not automatic conflict/time inference."""
+        if not self.flags.get("fact_versions", False):
+            raise ValueError("fact_versions is disabled")
+        return self._write(temporal_facts.record, **kwargs)
+
+    @staticmethod
+    def _sync_fact_fts(con):
+        # Migration/backfill of already-stored derived text; never calls a model.
+        while True:
+            rows = con.execute("SELECT f.* FROM facts f LEFT JOIN fact_fts t "
+                "ON t.fact_id=f.fact_id AND t.user_id=f.user_id WHERE t.fact_id IS NULL LIMIT 400").fetchall()
+            if not rows:
+                break
+            for row in rows:
+                con.execute("INSERT INTO fact_fts VALUES(?,?,?)",
+                            (features.index_text(row["text"]), row["fact_id"], row["user_id"]))
+
+    def link_fact_entity(self, **kwargs):
+        if not self.flags.get("complementary_recall", False):
+            raise ValueError("complementary_recall is disabled")
+        return self._write(complementary_recall.link_entity, **kwargs)
+
+    def recall_facts(self, *, user_id, query, valid_at=None, known_at=None, limit=50):
+        if not self.flags.get("complementary_recall", False):
+            raise ValueError("complementary_recall is disabled")
+        with self.connection() as con:
+            return complementary_recall.recall(con, user_id=user_id, query=query,
+                config=self.config, backend=self.embedding_backend,
+                valid_at=valid_at, known_at=known_at, limit=limit, flags=self.flags)
+
+    def _complement_candidates(self, con, user_id, query):
+        recalled = complementary_recall.recall(con, user_id=user_id, query=query,
+            config=self.config, backend=self.embedding_backend, limit=100, flags=self.flags)
+        sources = {r["fact_id"]:[s["message_id"] for s in r["sources"]] for r in recalled["results"]}
+        orders = dict(recalled["channel_orders"])
+        orders["fused"] = [r["fact_id"] for r in recalled["results"]]
+        channels = {}
+        for name, facts in orders.items():
+            ids = list(dict.fromkeys(mid for fid in facts for mid in sources.get(fid, ())))
+            channels["fact_" + name] = [(mid, "message", 0.0) for mid in ids[:self.config.max_candidates]]
+        return channels, recalled["channels"]
+
+    def facts_as_of(self, *, user_id, valid_at, known_at=None, limit=100) -> list[dict]:
+        if not self.flags.get("fact_versions", False):
+            raise ValueError("fact_versions is disabled")
+        with self.connection() as con:
+            return temporal_facts.as_of(con, user_id=user_id, valid_at=valid_at,
+                                        known_at=known_at, limit=limit)
 
     # ------------------------------------------------------------------ views
     def _session_rows(self, con, user_id, session_id, start, end) -> list[dict]:
@@ -862,6 +922,7 @@ class RetrieverDB:
         if options and self.flags.get("use_options", True):
             recall_text = query + " " + " ".join(str(o) for o in options)
         tokens = features.query_tokens(recall_text, self.config.max_query_tokens)
+        recall_status = {}
 
         with self.connection() as con:
             fts_candidates = self._fts_candidates(con, user_id, tokens)
@@ -878,6 +939,13 @@ class RetrieverDB:
                 "feature": feature_candidates,
                 "dense": dense_candidates,
             }
+            if self.flags.get("complementary_recall", False):
+                try:
+                    extra, recall_status = self._complement_candidates(con, user_id, recall_text)
+                    channel_candidates.update(extra)
+                except Exception:
+                    # Optional annotation/model failure never removes raw recall.
+                    recall_status = {"complementary": "failed"}
             candidate_types: dict[str, str] = {}
             for candidates in channel_candidates.values():
                 for doc_id, doc_type, _score in candidates:
@@ -952,6 +1020,7 @@ class RetrieverDB:
                 channel_ranks=r["channel_ranks"],
                 semantic_score=r.get("semantic_score"),
                 fusion_scores=r.get("fusion_scores", {}),
+                recall_status=dict(recall_status),
             )
             for r in final
         ]
@@ -1435,6 +1504,9 @@ class RetrieverDB:
                 "feature": float(getattr(self.config, "rrf_weight_feature", 1.0)),
                 "fts": float(getattr(self.config, "rrf_weight_lexical", 0.25)),
                 "dense": float(getattr(self.config, "rrf_weight_dense", 1.0)),
+                # The four fact routes fuse once before source projection. Their
+                # individual channel ranks remain audit-only, not four boosts.
+                "fact_fused": float(self.config.fact_recall_weight),
             }
             fused: dict[str, float] = {}
             for channel, order in channel_orders.items():
@@ -1515,6 +1587,8 @@ class RetrieverDB:
                 "DELETE FROM fts; DELETE FROM messages; DELETE FROM views; "
                 "DELETE FROM embeddings; DELETE FROM requests; DELETE FROM sessions;"
                 "DELETE FROM fact_sources; DELETE FROM fact_extractions; DELETE FROM facts;"
+                "DELETE FROM fact_versions; DELETE FROM fact_version_ops;"
+                "DELETE FROM fact_fts; DELETE FROM fact_entities;"
             )
             return {"deleted_messages": n}
 
@@ -1557,7 +1631,7 @@ class RetrieverDB:
 
     @staticmethod
     def _delete_facts(con, user_id):
-        for table in ("fact_sources", "fact_extractions", "facts"):
+        for table in ("fact_fts", "fact_entities", "fact_versions", "fact_version_ops", "fact_sources", "fact_extractions", "facts"):
             con.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
 
     # --------------------------------------------------------------- 只读辅助
