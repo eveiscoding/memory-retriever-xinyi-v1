@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from . import features
 from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
+from .facts import PROMPT_VERSION, extract_facts, fact_id, load_fact_backend, validate_backend
 from .protected_rerank import protected_order
 from .pair_rerank import load_pair_backend, pair_order, validate_pair_policy
 from .views import (
@@ -70,6 +71,8 @@ class AddResult:
     message_ids: list[str] = field(default_factory=list)
     idempotent: bool = False
     status: str = "ok"
+    fact_status: str = "disabled"
+    fact_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -126,12 +129,23 @@ class RetrieverDB:
         db_path: str | None = None,
         embedding_backend=None,
         pair_backend=None,
+        fact_backend=None,
     ):
         self.config = config or RetrieverConfig()
         if db_path is not None:
             self.config.db_path = db_path
         self.db_path = self.config.db_path
         self.flags = dict(self.config.flags)
+        self.facts_enabled = bool(self.flags.get("fact_extraction", False))
+        self.fact_backend = None
+        self._fact_lock = threading.RLock()
+        if self.facts_enabled:
+            if not 1 <= self.config.fact_max_input_chars <= 1000000 or not 1 <= self.config.fact_max_facts <= 256:
+                raise ValueError("fact input/fact limits are out of range")
+            self.fact_backend = fact_backend if fact_backend is not None else load_fact_backend(self.config.fact_backend)
+            if self.fact_backend is None:
+                raise ValueError("fact_extraction requires an explicit fact backend")
+            validate_backend(self.fact_backend)
         self.embedding_backend = embedding_backend or load_embedding_backend(
             self.config.dense_backend, dimension=self.config.dense_dimension
         )
@@ -249,6 +263,34 @@ class RetrieverDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_msg_scope ON messages(user_id, session_id, seq);
                 CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id);
+
+                CREATE TABLE IF NOT EXISTS facts(
+                    fact_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_role TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_facts_user ON facts(user_id, fact_id);
+                CREATE TABLE IF NOT EXISTS fact_sources(
+                    fact_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    quote TEXT NOT NULL,
+                    PRIMARY KEY(fact_id, message_id, quote)
+                );
+                CREATE INDEX IF NOT EXISTS idx_fact_sources_user ON fact_sources(user_id);
+                CREATE TABLE IF NOT EXISTS fact_extractions(
+                    request_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    backend_identity TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    error_code TEXT NOT NULL,
+                    fact_ids TEXT NOT NULL,
+                    PRIMARY KEY(request_id, user_id)
+                );
 
                 CREATE TABLE IF NOT EXISTS views(
                     view_id TEXT PRIMARY KEY,
@@ -428,13 +470,26 @@ class RetrieverDB:
             separators=(",", ":"),
         ).encode("utf-8")
         payload_hash = hashlib.sha256(canonical).hexdigest()
+        if self.facts_enabled:
+            # Input/output budgets apply outside SQLite's write lock/transaction.
+            # A future network provider MUST enforce its own request timeout.
+            # Serialize opt-in extraction so concurrent idempotent retries do not
+            # repeat provider calls. Raw-only Adds keep their existing fast path.
+            with self._fact_lock:
+                with self.connection() as con:
+                    existing = self._existing_add(con, request_id, user_id, session_id, payload_hash)
+                if existing is not None:
+                    return existing
+                batch = extract_facts(self.fact_backend, normalized,
+                    max_input_chars=self.config.fact_max_input_chars,
+                    max_facts=self.config.fact_max_facts)
+                return self._write(self._add_locked, request_id, user_id, session_id,
+                                   normalized, payload_hash, batch)
         return self._write(
             self._add_locked, request_id, user_id, session_id, normalized, payload_hash
         )
 
-    def _add_locked(
-        self, con, request_id, user_id, session_id, normalized, payload_hash
-    ) -> AddResult:
+    def _existing_add(self, con, request_id, user_id, session_id, payload_hash):
         row = con.execute(
             "SELECT message_ids, payload_hash FROM requests WHERE request_id=? AND user_id=?",
             (request_id, user_id),
@@ -444,13 +499,27 @@ class RetrieverDB:
                 raise IdempotencyConflictError(
                     "request_id was already used with a different session or message payload"
                 )
+            extraction = con.execute(
+                "SELECT status,fact_ids FROM fact_extractions WHERE request_id=? AND user_id=?",
+                (request_id, user_id),
+            ).fetchone()
             return AddResult(
                 request_id=request_id,
                 user_id=user_id,
                 session_id=session_id,
                 message_ids=json.loads(row["message_ids"]),
                 idempotent=True,
+                fact_status=extraction["status"] if extraction else "disabled",
+                fact_ids=json.loads(extraction["fact_ids"]) if extraction else [],
             )
+        return None
+
+    def _add_locked(
+        self, con, request_id, user_id, session_id, normalized, payload_hash, fact_batch=None
+    ) -> AddResult:
+        existing = self._existing_add(con, request_id, user_id, session_id, payload_hash)
+        if existing is not None:
+            return existing
 
         state = con.execute(
             "SELECT msg_count, last_ts_ms, seg_index, seg_start, seg_count "
@@ -523,13 +592,49 @@ class RetrieverDB:
                 con, user_id, session_id, old_count, new_count, touched_segments
             )
 
+        ids = []
+        if fact_batch is not None:
+            for fact in fact_batch.facts:
+                fid = fact_id(user_id, fact.source_role, fact.text)
+                con.execute("INSERT OR IGNORE INTO facts VALUES(?,?,?,?,?,?)",
+                    (fid, user_id, fact.text, fact.kind, fact.source_role, now))
+                for index, quote in fact.sources:
+                    con.execute("INSERT OR IGNORE INTO fact_sources VALUES(?,?,?,?)",
+                                (fid, user_id, new_ids[index], quote))
+                if fid not in ids:
+                    ids.append(fid)
+            con.execute("INSERT INTO fact_extractions VALUES(?,?,?,?,?,?,?)",
+                (request_id, user_id, fact_batch.status, fact_batch.identity,
+                 PROMPT_VERSION, fact_batch.error_code, json.dumps(ids)))
+
         return AddResult(
             request_id=request_id,
             user_id=user_id,
             session_id=session_id,
             message_ids=new_ids,
             idempotent=False,
+            fact_status=fact_batch.status if fact_batch is not None else "disabled",
+            fact_ids=ids,
         )
+
+    def list_facts(self, *, user_id: str, limit: int = 100) -> list[dict]:
+        """Internal, user-scoped audit interface; not a new HTTP/search channel."""
+        if not isinstance(user_id, str) or not user_id:
+            raise ValueError("user_id is required")
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("fact audit limit must be between 1 and 1000")
+        with self.connection() as con:
+            facts = [dict(r) for r in con.execute(
+                "SELECT * FROM facts WHERE user_id=? ORDER BY created_at,fact_id LIMIT ?",
+                (user_id, limit))]
+            for fact in facts:
+                fact["derived"] = True
+                fact["sources"] = [dict(r) for r in con.execute(
+                    "SELECT s.message_id,s.quote,m.role,m.ts_ms,m.session_id,m.request_id "
+                    "FROM fact_sources s JOIN messages m ON m.id=s.message_id AND m.user_id=s.user_id "
+                    "WHERE s.user_id=? AND s.fact_id=? ORDER BY s.message_id,s.quote",
+                    (user_id, fact["fact_id"]))]
+            return facts
 
     # ------------------------------------------------------------------ views
     def _session_rows(self, con, user_id, session_id, start, end) -> list[dict]:
@@ -1394,6 +1499,7 @@ class RetrieverDB:
             ).fetchone()[0]
             con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
+            self._delete_facts(con, user_id)
             con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM requests WHERE user_id=?", (user_id,))
@@ -1408,6 +1514,7 @@ class RetrieverDB:
             con.executescript(
                 "DELETE FROM fts; DELETE FROM messages; DELETE FROM views; "
                 "DELETE FROM embeddings; DELETE FROM requests; DELETE FROM sessions;"
+                "DELETE FROM fact_sources; DELETE FROM fact_extractions; DELETE FROM facts;"
             )
             return {"deleted_messages": n}
 
@@ -1436,6 +1543,7 @@ class RetrieverDB:
                 ).fetchone()[0]
                 con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
+                self._delete_facts(con, user_id)
                 con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM requests WHERE user_id=?", (user_id,))
@@ -1446,6 +1554,11 @@ class RetrieverDB:
             }
 
         return self._write(_do)
+
+    @staticmethod
+    def _delete_facts(con, user_id):
+        for table in ("fact_sources", "fact_extractions", "facts"):
+            con.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
 
     # --------------------------------------------------------------- 只读辅助
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
