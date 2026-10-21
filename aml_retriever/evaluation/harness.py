@@ -23,6 +23,11 @@ ADD_CHUNK_SIZE = 20
 OFFICIAL_TOP_K = 100
 
 _OFF = {name: False for name in DEFAULT_FLAGS}
+# Channel masks are inert policy parameters while complementary_recall=False,
+# not standalone enhancements. Preserve their defaults in every legacy stage
+# so the production profile remains an exact representation of DEFAULT_FLAGS.
+_OFF.update({name: value for name, value in DEFAULT_FLAGS.items()
+             if name.startswith("fact_recall_")})
 
 _L1 = {**_OFF, "use_options": True, "views": True}
 _L2 = {**_L1, "exact": True}

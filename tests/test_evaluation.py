@@ -264,6 +264,16 @@ class TestLadderIntegrity(unittest.TestCase):
             self.assertEqual(bool(stage.get(key, False)), bool(value),
                              f"开关 {key} 与 DEFAULT_FLAGS 不一致")
 
+    def test_dormant_fact_channel_masks_do_not_enable_legacy_sidecar(self):
+        for name, stage in ABLATION_LADDER:
+            with self.subTest(stage=name):
+                self.assertFalse(stage["complementary_recall"])
+                self.assertFalse(stage["fact_extraction"])
+                self.assertFalse(stage["fact_versions"])
+                for key in DEFAULT_FLAGS:
+                    if key.startswith("fact_recall_"):
+                        self.assertEqual(stage[key], DEFAULT_FLAGS[key])
+
     def test_control_stage_is_not_production(self):
         """CONTROL_STAGE 必须与 PRODUCTION_STAGE 是两个不同的档位。"""
         self.assertNotEqual(CONTROL_STAGE, PRODUCTION_STAGE)
