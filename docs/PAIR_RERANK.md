@@ -182,3 +182,15 @@ They can be combined in code, but the initial experiment compares baseline,
 pure MiniLM, Top20 only, and exact only, with no combined arm or weight sweep.
 Model input, artifact hash, truncation, returned pool and raw logits stay fixed.
 Diagnostics add `pair_top20_protect`, `pair_exact_protect`, and `pair_exact_anchor`.
+
+## Two-worker ONNX runtime option
+
+`AML_PAIR_BACKEND=aml_retriever.onnx_pair_backend:create_pooled_backend`
+selects exactly two independent tokenizer/session owners. The existing
+`create_backend` stays serialized. Keep `AML_PAIR_THREADS=1` and
+`AML_PAIR_BATCH_SIZE=1` for the validated two-worker profile. A bounded semaphore
+and exception-safe worker queue cap active inference at two; excess HTTP callers
+wait, without loading additional sessions. This does not change candidates,
+model artifacts, context, RRF weights, or fallback semantics. It increases memory
+requirements. Validate on an isolated endpoint/database before deployment; do
+not change a frozen official evaluation endpoint in place.

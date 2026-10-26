@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 from pathlib import Path
 
 
@@ -74,3 +75,36 @@ class OnnxPairBackend:
 
 def create_backend():
     return OnnxPairBackend()
+
+
+class PooledOnnxPairBackend:
+    """Exactly two independent tokenizer/session owners; no shared mutable state.
+
+    Borrow/return is exception-safe, bounding active inference even for callers
+    outside RetrieverDB. Waiting callers never create another model session.
+    """
+    worker_count = 2
+
+    def __init__(self):
+        self._workers = queue.Queue(maxsize=self.worker_count)
+        workers = [OnnxPairBackend() for _ in range(self.worker_count)]
+        first = workers[0]
+        if any(w.identity != first.identity or w.artifact_hashes != first.artifact_hashes
+               for w in workers):
+            raise ValueError("pooled ONNX artifacts must match")
+        self.identity = first.identity
+        self.artifact_hashes = first.artifact_hashes
+        self.model_hash = first.model_hash
+        for worker in workers:
+            self._workers.put_nowait(worker)
+
+    def score(self, query, documents):
+        worker = self._workers.get()
+        try:
+            return worker.score(query, documents)
+        finally:
+            self._workers.put_nowait(worker)
+
+
+def create_pooled_backend():
+    return PooledOnnxPairBackend()

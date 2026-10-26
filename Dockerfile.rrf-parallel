@@ -1,0 +1,7 @@
+# Preserve the previously verified ONNX dependency environment exactly.
+FROM flowgrid-rrf-frozen-base:20261022
+COPY aml_retriever/ /app/aml_retriever/
+COPY scripts/ /app/scripts/
+COPY tools/ /app/tools/
+COPY tests/ /app/tests/
+COPY docs/ /app/docs/

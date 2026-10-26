@@ -153,7 +153,12 @@ class RetrieverDB:
                              self.config.pair_rrf_weight, self.config.pair_rrf_k,
                              protect_top20=self.flags.get("pair_top20_protect", False),
                              protect_exact=self.flags.get("pair_exact_protect", False))
-        self._pair_lock = threading.RLock()
+        # Only the explicitly implemented pool permits concurrent model calls.
+        # Other/custom backends retain their original serialization contract.
+        from .onnx_pair_backend import PooledOnnxPairBackend
+        self._pair_lock = (threading.BoundedSemaphore(self.pair_backend.worker_count)
+                           if isinstance(self.pair_backend, PooledOnnxPairBackend)
+                           else threading.RLock())
         self.embedding_enabled = self.dense_enabled or self.semantic_enabled
         self._semantic_cache = OrderedDict()
         self._semantic_cache_lock = threading.RLock()
@@ -878,8 +883,9 @@ class RetrieverDB:
             return records
         try:
             count = min(len(records), self.config.pair_rerank_pool)
-            # No database lock is held during model inference. Serial calls bound
-            # model memory under concurrent HTTP searches. No query/result cache.
+            # No database lock is held during model inference. The original
+            # backend is serial; the explicit ONNX pool allows at most two calls.
+            # Neither path caches a query/result or creates sessions per request.
             with self._pair_lock:
                 scores = self.pair_backend.score(
                     query, [r["content"] or "" for r in records[:count]])
