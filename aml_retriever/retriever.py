@@ -312,6 +312,24 @@ class RetrieverDB:
                 """
             )
 
+            # FTS5's UNINDEXED doc_id cannot locate an update efficiently.
+            # Build a separate B-tree mapping once, atomically with its backfill.
+            # Keep every legacy row (including duplicate doc_ids) and its rowid.
+            con.execute("BEGIN IMMEDIATE")
+            mapped = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fts_doc_rows'"
+            ).fetchone()
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS fts_doc_rows("
+                "fts_rowid INTEGER PRIMARY KEY, doc_id TEXT NOT NULL, user_id TEXT NOT NULL)"
+            )
+            con.execute("CREATE INDEX IF NOT EXISTS idx_fts_doc_rows_doc ON fts_doc_rows(doc_id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_fts_doc_rows_user ON fts_doc_rows(user_id)")
+            if mapped is None:
+                con.execute(
+                    "INSERT INTO fts_doc_rows SELECT rowid, doc_id, user_id FROM fts"
+                )
+
             # 旧数据库的无损迁移；历史记录 hash 为空，仍保持旧版幂等语义。
             columns = {row[1] for row in con.execute("PRAGMA table_info(requests)")}
             if "payload_hash" not in columns:
@@ -604,12 +622,28 @@ class RetrieverDB:
         self._index_doc(con, view_id, user_id, view_type, content)
 
     def _index_doc(self, con, doc_id, user_id, doc_type, content) -> None:
-        con.execute("DELETE FROM fts WHERE doc_id=?", (doc_id,))
         con.execute(
+            "DELETE FROM fts WHERE rowid IN "
+            "(SELECT fts_rowid FROM fts_doc_rows WHERE doc_id=?)", (doc_id,)
+        )
+        con.execute("DELETE FROM fts_doc_rows WHERE doc_id=?", (doc_id,))
+        inserted = con.execute(
             "INSERT INTO fts(text, doc_id, user_id, doc_type) VALUES(?,?,?,?)",
             (features.index_text(content), doc_id, user_id, doc_type),
         )
+        con.execute(
+            "INSERT INTO fts_doc_rows(fts_rowid,doc_id,user_id) VALUES(?,?,?)",
+            (inserted.lastrowid, doc_id, user_id),
+        )
         self._embed_doc(con, doc_id, user_id, doc_type, content)
+
+    @staticmethod
+    def _delete_user_fts(con, user_id: str) -> None:
+        con.execute(
+            "DELETE FROM fts WHERE rowid IN "
+            "(SELECT fts_rowid FROM fts_doc_rows WHERE user_id=?)", (user_id,)
+        )
+        con.execute("DELETE FROM fts_doc_rows WHERE user_id=?", (user_id,))
 
     # ----------------------------------------------------------------- Search
     def _match_expr(self, tokens: list[str]) -> str | None:
@@ -1379,7 +1413,7 @@ class RetrieverDB:
             n_view = con.execute(
                 "SELECT COUNT(*) FROM views WHERE user_id=?", (user_id,)
             ).fetchone()[0]
-            con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
+            self._delete_user_fts(con, user_id)
             con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
             con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
@@ -1393,7 +1427,7 @@ class RetrieverDB:
         def _do(con):
             n = con.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             con.executescript(
-                "DELETE FROM fts; DELETE FROM messages; DELETE FROM views; "
+                "DELETE FROM fts; DELETE FROM fts_doc_rows; DELETE FROM messages; DELETE FROM views; "
                 "DELETE FROM embeddings; DELETE FROM requests; DELETE FROM sessions;"
             )
             return {"deleted_messages": n}
@@ -1421,7 +1455,7 @@ class RetrieverDB:
                 deleted_messages += con.execute(
                     "SELECT COUNT(*) FROM messages WHERE user_id=?", (user_id,)
                 ).fetchone()[0]
-                con.execute("DELETE FROM fts WHERE user_id=?", (user_id,))
+                self._delete_user_fts(con, user_id)
                 con.execute("DELETE FROM embeddings WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
                 con.execute("DELETE FROM views WHERE user_id=?", (user_id,))
