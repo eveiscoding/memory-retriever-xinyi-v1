@@ -7,7 +7,7 @@ import threading
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
 
 from aml_retriever.api import MemoryService
@@ -51,16 +51,28 @@ class TestNoContentInLogs(unittest.TestCase):
 
     def test_request_content_never_printed(self):
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        errors = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(errors):
             self._post("/add", {
                 "request_id": "p1", "user_id": "priv-u", "session_id": "s1",
                 "messages": [{"role": "user", "content": SECRET}],
             })
             self._post("/search", {"query": SECRET, "user_id": "priv-u", "top_k": 5})
-        logged = buffer.getvalue()
+        logged = buffer.getvalue() + errors.getvalue()
         self.assertNotIn(SECRET, logged)
         self.assertNotIn("110101199003074", logged)
-        self.assertIn("/add", logged)  # 元信息仍然可观测
+        if self.server.safe_diagnostics:
+            self.assertEqual(buffer.getvalue(), "")
+            self.assertNotIn("/add", logged)
+            self.assertNotIn("priv-u", logged)
+            records = [json.loads(line) for line in errors.getvalue().splitlines()]
+            self.assertTrue(records)  # 首次Add的日志在后续Search之前已输出
+            for record in records:
+                self.assertEqual(set(record), {"event", "stage", "elapsed_ms", "error_type"})
+                self.assertEqual(record["event"], "aml_timing")
+                self.assertGreaterEqual(record["elapsed_ms"], 0)
+        else:
+            self.assertIn("/add", logged)  # 旧模式元信息仍然可观测
 
 
 class TestDeleteLifecycle(unittest.TestCase):
