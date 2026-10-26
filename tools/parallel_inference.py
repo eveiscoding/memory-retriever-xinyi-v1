@@ -55,7 +55,7 @@ def corpus():
             other = topics[(q+i//25) % 4][1]
             repetitions = [8, 20, 45, 120][i % 4]
             docs.append(f'Synthetic event {i}: ' + (other + ' ') * repetitions
-                        + f' Detail {terms.split()[i % 5]}.')
+                        + f' Detail {terms.split()[i % len(terms.split())]}.')
         result.append((query, docs))
     return result
 
