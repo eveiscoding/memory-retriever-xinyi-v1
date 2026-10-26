@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import hmac
+import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +24,39 @@ from .api import ApiError, MemoryService
 from .config import RetrieverConfig
 
 MAX_BODY_BYTES = 32 * 1024 * 1024  # 32MB，覆盖 20 条消息 / 2000 词的分块上限
+
+# Fixed vocabulary: never serialize exception messages, custom class names,
+# traceback locals, headers, URLs, payloads or identifiers.
+_DIAGNOSTIC_ERRORS = frozenset({
+    "ApiError", "OperationalError", "IntegrityError", "DatabaseError",
+    "DataError", "ProgrammingError", "InterfaceError", "InternalError",
+    "ValueError", "TypeError", "OverflowError", "UnicodeError",
+    "UnicodeEncodeError", "UnicodeDecodeError", "MemoryError", "OSError",
+    "BrokenPipeError", "ConnectionResetError", "TimeoutError",
+    "RuntimeError", "JSONDecodeError",
+})
+
+
+def _error_category(exc_type) -> str:
+    name = exc_type.__name__ if exc_type is not None else "none"
+    return name if name in _DIAGNOSTIC_ERRORS else "OtherError"
+
+
+def _diagnostic(server, stage: str, started: float, exc_type=None) -> None:
+    if not getattr(server, "safe_diagnostics", False):
+        return
+    try:
+        print(json.dumps({
+            "event": "aml_timing",
+            "stage": stage if stage in {"route", "auth", "capacity", "read_body",
+                                       "add", "search", "admin", "response", "handler"}
+                     else "handler",
+            "elapsed_ms": round(max(0.0, time.monotonic() - started) * 1000, 3),
+            "error_type": "none" if exc_type is None else _error_category(exc_type),
+        }), file=sys.stderr, flush=True)
+    except Exception:
+        # Diagnostic output failures must not alter the API result.
+        pass
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -39,7 +74,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # noqa: A003
         """只记录访问元信息，绝不记录请求/响应正文。"""
-        if getattr(self.server, "quiet", False):  # type: ignore[attr-defined]
+        if (getattr(self.server, "quiet", False)
+                or getattr(self.server, "safe_diagnostics", False)):
             return
         super().log_message(fmt, *args)
 
@@ -101,6 +137,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         started = time.time()
+        diagnostic_started = time.monotonic()
+        stage = "route"
+        error_type = None
         path = self.path.split("?", 1)[0]
         try:
             allowed = {self.config.add_path, self.config.search_path}
@@ -110,10 +149,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # 正文尚未读取；关闭 keep-alive，避免代理复用带残留正文的连接。
                 self.close_connection = True
                 raise ApiError(404, f"unknown path: {path}")
+            stage = "auth"
             if not self._authorized():
                 self.close_connection = True
                 raise ApiError(401, "unauthorized: invalid or missing credential")
 
+            stage = "capacity"
             if not self.server.inflight.acquire(blocking=False):  # type: ignore[attr-defined]
                 self.close_connection = True
                 self._send_json(
@@ -124,26 +165,37 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             try:
+                stage = "read_body"
                 payload = self._read_json()
                 if path == self.config.add_path:
-                    self._send_json(200, self.service.official_add(payload))
+                    stage = "add"
+                    body = self.service.official_add(payload)
                 elif path == self.config.search_path:
-                    self._send_json(200, self.service.official_search(payload))
+                    stage = "search"
+                    body = self.service.official_search(payload)
                 else:
+                    stage = "admin"
                     user_id = payload.get("user_id") if isinstance(payload, dict) else None
                     if not user_id:
                         raise ApiError(422, "'user_id' is required")
-                    self._send_json(200, self.service.delete_user(user_id))
+                    body = self.service.delete_user(user_id)
+                stage = "response"
+                self._send_json(200, body)
             finally:
                 self.server.inflight.release()  # type: ignore[attr-defined]
         except ApiError as exc:
+            error_type = type(exc)
             self._send_json(exc.status, exc.to_body())
-        except Exception:  # 不外泄内部细节与记忆内容
+        except Exception as exc:  # 不外泄内部细节与记忆内容
+            error_type = type(exc)
             self._send_json(500, ApiError(500, "internal error").to_body())
+        finally:
+            _diagnostic(self.server, stage, diagnostic_started, error_type)
         self._trace("POST", path, started)
 
     def _trace(self, method: str, path: str, started: float) -> None:
-        if getattr(self.server, "quiet", False):  # type: ignore[attr-defined]
+        if (getattr(self.server, "quiet", False)
+                or getattr(self.server, "safe_diagnostics", False)):
             return
         elapsed_ms = (time.time() - started) * 1000.0
         # 只有元信息，无正文
@@ -159,6 +211,9 @@ class RetrieverServer(ThreadingHTTPServer):
         self.config = config.validate()
         self.service = service or MemoryService(config)
         self.quiet = quiet
+        self.safe_diagnostics = os.environ.get("AML_SAFE_DIAGNOSTICS", "0").lower() in {
+            "1", "true", "yes", "on",
+        }
         self.request_queue_size = int(config.request_queue_size)
         self.inflight = threading.BoundedSemaphore(int(config.max_inflight))
         self._cleanup_stop = threading.Event()
@@ -167,6 +222,13 @@ class RetrieverServer(ThreadingHTTPServer):
             target=self._cleanup_loop, name="aml-retention-cleanup", daemon=True
         )
         self._cleanup_thread.start()
+
+    def handle_error(self, request, client_address):
+        if self.safe_diagnostics:
+            # The standard handler prints client addresses and traceback text.
+            _diagnostic(self, "handler", time.monotonic(), sys.exc_info()[0])
+        else:
+            super().handle_error(request, client_address)
 
     def _cleanup_loop(self) -> None:
         if self.config.retention_days <= 0:
