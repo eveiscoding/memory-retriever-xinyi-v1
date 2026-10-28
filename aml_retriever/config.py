@@ -37,6 +37,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "vector": False,     # dense 候选通道；还需显式配置 dense_backend
     "pair_top20_protect": False,  # preserve baseline Top20 membership only
     "pair_exact_protect": False,  # pin up to 3 diverse exact evidence slots
+    "fact_support": False,  # frozen-pool numeric fact support; experimental
     "pair_rerank": False,  # query/document cross-encoder, experimental
     "semantic_rerank": False,  # 冻结原召回集合后，用 embedding 分桶重排（实验）
     # 覆写检测（supersession）：在候选集内找「话题高度重合但更晚」的消息对，
@@ -96,6 +97,15 @@ class RetrieverConfig:
     # (cc). The shared knob keeps the two mutually exclusive ablations aligned.
     pair_rrf_weight: float = 0.25
     pair_rrf_k: float = 60.0
+    fact_support_mode: str = "rules"
+    fact_support_backend: str = ""
+    fact_support_dimension: int = 1024
+    fact_support_weight: float = 0.1
+    fact_support_k: float = 60.0
+    fact_support_max_chars: int = 32768
+    fact_support_per_doc: int = 4
+    fact_support_max_total: int = 400
+    fact_support_min_similarity: float = 0.25
     semantic_rerank_pool: int = 100
     semantic_rerank_boundary: int = 20
     semantic_rerank_exact_quota: int = 3
@@ -175,6 +185,15 @@ class RetrieverConfig:
             "AML_PAIR_RERANK_MODE": ("pair_rerank_mode", str),
             "AML_PAIR_RRF_WEIGHT": ("pair_rrf_weight", float),
             "AML_PAIR_RRF_K": ("pair_rrf_k", float),
+            "AML_FACT_SUPPORT_MODE": ("fact_support_mode", str),
+            "AML_FACT_SUPPORT_BACKEND": ("fact_support_backend", str),
+            "AML_FACT_SUPPORT_DIMENSION": ("fact_support_dimension", int),
+            "AML_FACT_SUPPORT_WEIGHT": ("fact_support_weight", float),
+            "AML_FACT_SUPPORT_K": ("fact_support_k", float),
+            "AML_FACT_SUPPORT_MAX_CHARS": ("fact_support_max_chars", int),
+            "AML_FACT_SUPPORT_PER_DOC": ("fact_support_per_doc", int),
+            "AML_FACT_SUPPORT_MAX_TOTAL": ("fact_support_max_total", int),
+            "AML_FACT_SUPPORT_MIN_SIMILARITY": ("fact_support_min_similarity", float),
             "AML_SEMANTIC_RERANK_POOL": ("semantic_rerank_pool", int),
             "AML_SEMANTIC_RERANK_BOUNDARY": ("semantic_rerank_boundary", int),
             "AML_SEMANTIC_RERANK_EXACT_QUOTA": ("semantic_rerank_exact_quota", int),
@@ -198,6 +217,8 @@ class RetrieverConfig:
                 try:
                     setattr(cfg, attr, caster(raw))
                 except (TypeError, ValueError):
+                    if env_key.startswith("AML_FACT_SUPPORT_"):
+                        raise ValueError("invalid fact support environment configuration") from None
                     pass
 
         raw_admin = os.environ.get("AML_ADMIN_ENABLED")
@@ -214,6 +235,12 @@ class RetrieverConfig:
 
     def validate(self) -> "RetrieverConfig":
         """Fail closed on unsafe or ambiguous production configuration."""
+        from .fact_support import validate_policy
+        validate_policy(self.fact_support_mode, self.fact_support_weight, self.fact_support_k,
+                        self.fact_support_max_chars, self.fact_support_per_doc,
+                        self.fact_support_max_total, self.fact_support_min_similarity)
+        if isinstance(self.fact_support_dimension, bool) or not isinstance(self.fact_support_dimension, int) or self.fact_support_dimension < 8:
+            raise ValueError("fact support dimension must be an integer >= 8")
         mode = (self.auth_mode or "none").strip().lower()
         if mode not in {"none", "bearer", "token", "x-api-key"}:
             raise ValueError("auth_mode must be one of: none, bearer, token, x-api-key")

@@ -125,6 +125,7 @@ class RetrieverDB:
         db_path: str | None = None,
         embedding_backend=None,
         pair_backend=None,
+        fact_embedding_backend=None,
     ):
         self.config = config or RetrieverConfig()
         if db_path is not None:
@@ -159,6 +160,20 @@ class RetrieverDB:
         self._pair_lock = (threading.BoundedSemaphore(self.pair_backend.worker_count)
                            if isinstance(self.pair_backend, PooledOnnxPairBackend)
                            else threading.RLock())
+        from .fact_support import validate_policy
+        validate_policy(self.config.fact_support_mode, self.config.fact_support_weight,
+                        self.config.fact_support_k, self.config.fact_support_max_chars,
+                        self.config.fact_support_per_doc, self.config.fact_support_max_total,
+                        self.config.fact_support_min_similarity)
+        self.fact_support_enabled = bool(self.flags.get("fact_support", False))
+        self.fact_embedding_backend = None
+        if (self.fact_support_enabled and self.config.fact_support_mode == "embedding"
+                and self.config.fact_support_weight > 0):
+            self.fact_embedding_backend = (fact_embedding_backend or load_embedding_backend(
+                self.config.fact_support_backend, dimension=self.config.fact_support_dimension))
+            if self.fact_embedding_backend is None:
+                raise ValueError("fact support embedding mode requires a backend")
+        self._fact_support_lock = threading.RLock()
         self.embedding_enabled = self.dense_enabled or self.semantic_enabled
         self._semantic_cache = OrderedDict()
         self._semantic_cache_lock = threading.RLock()
@@ -857,6 +872,9 @@ class RetrieverDB:
         if self.pair_enabled:
             final = self._pair_rerank(recall_text, final)
 
+        if self.fact_support_enabled:
+            final = self._fact_support_rerank(query, final)
+
         results = [
             Evidence(
                 id=r["id"],
@@ -869,6 +887,8 @@ class RetrieverDB:
                 provenance=(
                     f"{r['view']}:{r['id']}<-[{','.join(r['source_ids'])}]"
                     f";channels={json.dumps(r['channel_ranks'], sort_keys=True)}"
+                    + (";fact_support=" + json.dumps(r["fact_support_trace"], sort_keys=True)
+                       if "fact_support_trace" in r else "")
                 ),
                 evidence_flags=r["flags"],
                 channel_ranks=r["channel_ranks"],
@@ -877,6 +897,21 @@ class RetrieverDB:
             for r in final
         ]
         return SearchResult(request_id=request_id, total=len(ordered), results=results)
+
+    def _fact_support_rerank(self, query, records):
+        from .fact_support import fact_support_order
+        cfg = self.config
+        try:
+            with self._fact_support_lock:
+                return fact_support_order(records, query, mode=cfg.fact_support_mode,
+                    backend=self.fact_embedding_backend, weight=cfg.fact_support_weight,
+                    k=cfg.fact_support_k, max_chars=cfg.fact_support_max_chars,
+                    per_doc=cfg.fact_support_per_doc, max_total=cfg.fact_support_max_total,
+                    min_similarity=cfg.fact_support_min_similarity)
+        except Exception:
+            # Never log backend errors: providers may include request text/secrets.
+            return [dict(r, flags=list(r["flags"]) + ["fact_support_fallback"])
+                    for r in records]
 
     def _pair_rerank(self, query, records):
         if not records:
