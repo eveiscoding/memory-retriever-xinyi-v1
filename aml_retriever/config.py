@@ -31,6 +31,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     # 更大的权重能换来更高 MRR（mixed w=1.0 时 +0.0325），但要付出 Recall@20 代价
     # （mixed 0.8750、paraphrase 0.7708），属于用召回换排序，未作为默认。
     "rrf": True,         # FTS rank 与特征分值两路加权 RRF 融合
+    "source_aware_dedup": False,  # final source/text covered evidence deferral
     "dedup": True,       # 候选去重（同内容 / 完全被覆盖的聚合视图）
     "use_options": True, # Search 的 options 字段参与候选召回
     "exact_scan": False, # FTS 无命中时的兜底 LIKE 全扫（代价高，默认关闭）

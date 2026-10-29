@@ -36,6 +36,7 @@ from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
 from .protected_rerank import protected_order
 from .pair_rerank import load_pair_backend, pair_order, validate_pair_policy
+from .source_dedup import source_aware_order
 from .views import (
     affected_window_starts,
     join_content,
@@ -857,6 +858,9 @@ class RetrieverDB:
         if self.pair_enabled:
             final = self._pair_rerank(recall_text, final)
 
+        if self.flags.get("source_aware_dedup", False):
+            final = self._source_dedup_order(user_id, final)
+
         results = [
             Evidence(
                 id=r["id"],
@@ -869,6 +873,8 @@ class RetrieverDB:
                 provenance=(
                     f"{r['view']}:{r['id']}<-[{','.join(r['source_ids'])}]"
                     f";channels={json.dumps(r['channel_ranks'], sort_keys=True)}"
+                    + (";source_dedup=" + json.dumps(r["source_dedup"], sort_keys=True)
+                       if "source_dedup" in r else "")
                 ),
                 evidence_flags=r["flags"],
                 channel_ranks=r["channel_ranks"],
@@ -877,6 +883,20 @@ class RetrieverDB:
             for r in final
         ]
         return SearchResult(request_id=request_id, total=len(ordered), results=results)
+
+    @staticmethod
+    def _source_dedup_order(user_id, records):
+        try:
+            ordered, audit = source_aware_order(records, user_id=user_id)
+        except Exception:
+            for record in records:
+                record["flags"].append("source_dedup_fallback")
+            return records
+        for record in ordered:
+            record["source_dedup"] = audit[record["id"]]
+            if audit[record["id"]]["status"] == "deferred":
+                record["flags"].append("source_duplicate_deferred")
+        return ordered
 
     def _pair_rerank(self, query, records):
         if not records:
