@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile_id": "source-evidence-8k-v1",
+  "budget": 8192,
+  "parent_limit": 20,
+  "windows": {
+    "max_pair_tokens": 512,
+    "window_tokens": 384,
+    "overlap": 64,
+    "max_windows": 5000
+  },
+  "selection": {
+    "context_tokens": 96
+  },
+  "behavior_in_code": {
+    "short_reply_tokens": 64,
+    "query_adaptive": true,
+    "global_source_model_sort": true,
+    "per_parent_cap": null,
+    "source_overlap_union": true
+  },
+  "retrieval_commit": "060d9d044b8d90c26feadcd11af3b05fec184b4e",
+  "evaluated_output_commit": "d060c736a2ab3e6fdfe440f454cae13a4b93b29b",
+  "model": {
+    "id": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "revision": "1427fd652930e4ba29e8149678df786c240d8825",
+    "onnx_file": "onnx/model_quint8_avx2.onnx",
+    "hash": "781f3f03fe04bf180ba0d912b6ee7f0177cf793176b5a317a8a5e0e8e7036559",
+    "max_length": 512,
+    "batch_size": 1,
+    "threads": 1
+  },
+  "budget_kind": "MiniLM reference tokenizer; complete rendered evidence including metadata; excludes query/system/answer",
+  "validation": {
+    "scope": "Previously fixed public development32; primary30 exact labels and2 weak diagnostics; not heldout or Answer score",
+    "accepted_budget": 8192,
+    "gate": "PASS",
+    "summary_sha256": "6e10d5e801856ce34eba9d85f9b238552b5a85b6c8c0bcca59de740a50bf289c",
+    "prelock_sha256": "15229a3f79807ce207cb4ae8770a59f68b20c1f831efcfa6b5e5194ffc7a9859",
+    "input_sha256": "68f2a4570ebd967b01e4818225cbaf05173333c30f8d3a07c7f660ec2bf607fc",
+    "benchmark_commit": "180da0c6fa2173789b76146c4a9df05545df5d0f"
+  }
+}
