@@ -1,24 +1,27 @@
-# Source-aware result ordering (experimental)
+# Source-aware ordering with visible-input protection (experimental)
 
-Disabled by default: set flags.source_aware_dedup=true explicitly.
+Disabled by default: flags.source_aware_dedup=true opts in. It requires reliable
+pair-backend visible_spans(query, documents) support; unknown/invalid visibility
+keeps original pair order and marks source_visibility_unavailable. Pair inference
+success is retained if the optional span provider fails.
 
-After the existing pair/semantic ranking, stably defer a candidate only when an
-EARLIER RETAINED SINGLE candidate has both (1) a superset of its original source
-message IDs and (2) its complete whitespace-normalized text as a substring.
-Distinct source IDs, partial text overlap, new context and unknown provenance are
-retained. A union of separate messages cannot replace a joint-context document.
-No role or recency filtering, semantic threshold, model call, deletion or score
-change is used. All original candidates remain: retained prefix then deferred
-tail, each in original relative order. Scores remain upstream relevance scores;
-array order is the final rank. Pre-rerank dedup and source slot guarantees stay
-unchanged. The opt-in final ordering may change view proportions in short prefixes.
+One earlier retained SINGLE witness must contain both the original source ID set
+and the complete target body (whitespace-normalized, case-sensitive), and its
+actual query/model input span must contain that complete body as well. New facts,
+new source IDs, joint context and compact facts beyond a long view's visible
+prefix are retained. No role/time/embedding threshold is used.
 
-Provenance records original rank and the retained covering witness; flags mark
-deferred candidates. Any selector failure keeps original order and marks fallback.
-The function is request-local, has no cache/DB reads, and requires one tenant pool.
+ONNX visible_spans repeats exactly the score tokenizer options, excluding query
+and padding offsets. It adds tokenizer work only, no graph inference. The pooled
+backend leases a tokenizer/session owner for this operation; no mutable last-call
+trace or cross-query cache is used. The retriever validates aligned bounds under
+its pair lock and attaches request-local metadata by original document ID.
 
-Evaluation must separate ranking metrics, complete-marker coverage and duplicate
-occupancy. The strict condition reduces an opportunity for information loss but
-does not prove answer quality, semantic equivalence or production latency.
-Current offline experiment reuses frozen public candidate pools and upstream model
-scores; it is not fresh inference, a new holdout or full Search/Answer evaluation.
+All original documents, content and scores remain; only final array order may
+change. Scores remain upstream relevance scores. Short-prefix source proportions
+and full-text budget may change; evaluate them separately. Output provenance
+records covering witness and its visible interval, not raw text or credentials.
+
+Frozen-pool replay is not fresh inference, a new holdout or full Search/Answer
+validation. Both complete-original gold ranking and actual-input marker coverage
+must be checked. Marker coverage does not establish semantic or answer accuracy.

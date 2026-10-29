@@ -73,6 +73,32 @@ class OnnxPairBackend:
         return scores
 
 
+    def visible_spans(self, query, documents):
+        """Reproduce score() tokenization offsets without running the ONNX graph.
+
+        Request-local return value, never shared last-call state. A pooled caller
+        must lease the tokenizer owner while this method is running.
+        """
+        length = len(self.tokenizer.encode(query, add_special_tokens=False))
+        if length + self.tokenizer.num_special_tokens_to_add(pair=True) >= self.max_length:
+            raise ValueError("query exceeds ONNX context")
+        spans = []
+        for start in range(0, len(documents), self.batch_size):
+            batch = documents[start:start + self.batch_size]
+            encoded = self.tokenizer([query] * len(batch), list(batch), padding=True,
+                                     truncation="only_second", max_length=self.max_length,
+                                     return_tensors="np", return_offsets_mapping=True)
+            for index, document in enumerate(batch):
+                ends = [int(end) for (begin, end), sequence in zip(
+                    encoded["offset_mapping"][index], encoded.sequence_ids(index))
+                    if sequence == 1 and int(end) > int(begin)]
+                end = max(ends, default=0)
+                if end < 0 or end > len(document):
+                    raise ValueError("invalid document token offsets")
+                spans.append((0, end))
+        return spans
+
+
 def create_backend():
     return OnnxPairBackend()
 
@@ -102,6 +128,14 @@ class PooledOnnxPairBackend:
         worker = self._workers.get()
         try:
             return worker.score(query, documents)
+        finally:
+            self._workers.put_nowait(worker)
+
+
+    def visible_spans(self, query, documents):
+        worker = self._workers.get()
+        try:
+            return worker.visible_spans(query, documents)
         finally:
             self._workers.put_nowait(worker)
 

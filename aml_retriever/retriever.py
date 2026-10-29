@@ -36,7 +36,7 @@ from .config import RetrieverConfig
 from .embeddings import load_embedding_backend
 from .protected_rerank import protected_order
 from .pair_rerank import load_pair_backend, pair_order, validate_pair_policy
-from .source_dedup import source_aware_order
+from .source_dedup import source_aware_order, validate_visible_spans
 from .views import (
     affected_window_starts,
     join_content,
@@ -887,7 +887,9 @@ class RetrieverDB:
     @staticmethod
     def _source_dedup_order(user_id, records):
         try:
-            ordered, audit = source_aware_order(records, user_id=user_id)
+            ordered, audit = source_aware_order(records, user_id=user_id,
+                visible_spans={r["id"]: r["_source_visible_span"] for r in records
+                               if "_source_visible_span" in r})
         except Exception:
             for record in records:
                 record["flags"].append("source_dedup_fallback")
@@ -903,18 +905,33 @@ class RetrieverDB:
             return records
         try:
             count = min(len(records), self.config.pair_rerank_pool)
-            # No database lock is held during model inference. The original
-            # backend is serial; the explicit ONNX pool allows at most two calls.
-            # Neither path caches a query/result or creates sessions per request.
+            requested = self.flags.get("source_aware_dedup", False)
+            visibility = None
+            # Optional token-only visibility uses the same owner/lease contract
+            # as inference. No mutable last-call trace is shared across queries.
             with self._pair_lock:
-                scores = self.pair_backend.score(
-                    query, [r["content"] or "" for r in records[:count]])
-            return pair_order(records, scores, pool=count,
-                              mode=self.config.pair_rerank_mode,
-                              weight=self.config.pair_rrf_weight, k=self.config.pair_rrf_k,
-                              protect_top20=self.flags.get("pair_top20_protect", False),
-                              protect_exact=self.flags.get("pair_exact_protect", False),
-                              query=query)
+                documents = [r["content"] or "" for r in records[:count]]
+                scores = self.pair_backend.score(query, documents)
+                if requested:
+                    try:
+                        provider = getattr(self.pair_backend, "visible_spans")
+                        visibility = validate_visible_spans(
+                            records[:count], provider(query, documents))
+                    except Exception:
+                        visibility = None
+            ordered = pair_order(records, scores, pool=count,
+                                 mode=self.config.pair_rerank_mode,
+                                 weight=self.config.pair_rrf_weight, k=self.config.pair_rrf_k,
+                                 protect_top20=self.flags.get("pair_top20_protect", False),
+                                 protect_exact=self.flags.get("pair_exact_protect", False),
+                                 query=query)
+            if requested:
+                for record in records[:count]:
+                    if visibility is None:
+                        record["flags"].append("source_visibility_unavailable")
+                    else:
+                        record["_source_visible_span"] = visibility[record["id"]]
+            return ordered
         except Exception:
             for record in records:
                 record["flags"].append("pair_rerank_fallback")

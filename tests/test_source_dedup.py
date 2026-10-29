@@ -7,6 +7,11 @@ from aml_retriever.config import RetrieverConfig
 from aml_retriever.retriever import RetrieverDB
 
 
+def fully_visible_order(records, *, user_id):
+    return source_aware_order(records, user_id=user_id,
+        visible_spans={r["id"]: (0,len(r.get("content") or "")) for r in records})
+
+
 def rec(i, sources, text, **extra):
     return dict(id=i,source_ids=sources,content=text,score=10.,flags=[],**extra)
 
@@ -14,36 +19,36 @@ def rec(i, sources, text, **extra):
 class SourceOrderTests(unittest.TestCase):
     def test_message_deferred_and_new_fact_kept(self):
         rows=[rec('view',['a','b'],'user: alpha\nassistant: beta'),rec('msg',['a'],'alpha'),rec('new',['c'],'gamma')]
-        before=copy.deepcopy(rows);ordered,a=source_aware_order(rows,user_id='u')
+        before=copy.deepcopy(rows);ordered,a=fully_visible_order(rows,user_id='u')
         self.assertEqual([r['id'] for r in ordered],['view','new','msg'])
         self.assertEqual(a['msg']['covered_by'],'view');self.assertEqual(rows,before)
         self.assertTrue(all(any(r is old for old in rows) for r in ordered))
 
     def test_distinct_events_with_same_text_kept(self):
         rows=[rec('old',['old-msg'],'bought one'),rec('new',['new-msg'],'bought one')]
-        self.assertEqual(source_aware_order(rows,user_id='u')[0],rows)
+        self.assertEqual(fully_visible_order(rows,user_id='u')[0],rows)
 
     def test_partial_overlap_and_additional_context_kept(self):
         rows=[rec('a',['x','y'],'alpha beta'),rec('b',['y','z'],'beta gamma'),rec('c',['x'],'alpha new detail')]
-        self.assertEqual(source_aware_order(rows,user_id='u')[0],rows)
+        self.assertEqual(fully_visible_order(rows,user_id='u')[0],rows)
 
     def test_union_of_sources_does_not_replace_joint_context(self):
         rows=[rec('a',['x'],'alpha'),rec('b',['y'],'beta'),rec('joint',['x','y'],'alpha beta')]
-        self.assertEqual(source_aware_order(rows,user_id='u')[0],rows)
+        self.assertEqual(fully_visible_order(rows,user_id='u')[0],rows)
 
     def test_unknown_or_malformed_provenance_is_retained(self):
         for sources in (None,[],[''],[None],'x'):
             rows=[rec('a',['x'],'alpha'),rec('b',sources,'alpha')]
-            self.assertEqual(source_aware_order(rows,user_id='u')[1]['b']['status'],'retained')
+            self.assertEqual(fully_visible_order(rows,user_id='u')[1]['b']['status'],'retained')
 
     def test_whitespace_only_normalization_and_case(self):
         rows=[rec('a',['x'],'user: alpha   beta'),rec('b',['x'],'alpha\n beta'),rec('c',['x'],'Alpha beta')]
-        out,a=source_aware_order(rows,user_id='u')
+        out,a=fully_visible_order(rows,user_id='u')
         self.assertEqual([r['id'] for r in out],['a','c','b']);self.assertEqual(a['b']['status'],'deferred')
 
     def test_stable_tail_and_witness_is_retained(self):
         rows=[rec('a',['x','y'],'alpha beta'),rec('b',['x'],'alpha'),rec('c',['z'],'gamma'),rec('d',['y'],'beta')]
-        out,a=source_aware_order(rows,user_id='u')
+        out,a=fully_visible_order(rows,user_id='u')
         self.assertEqual([r['id'] for r in out],['a','c','b','d'])
         self.assertEqual([a[i]['covered_by'] for i in ('b','d')],['a','a'])
 
@@ -51,17 +56,17 @@ class SourceOrderTests(unittest.TestCase):
         for rows in ([rec('a',['x'],'alpha'),rec('a',['y'],'beta')],
                      [rec('a',['x'],'alpha',user_id='u'),rec('b',['x'],'alpha',user_id='other')]):
             before=copy.deepcopy(rows)
-            with self.assertRaises(ValueError):source_aware_order(rows,user_id='u')
+            with self.assertRaises(ValueError):fully_visible_order(rows,user_id='u')
             self.assertEqual(rows,before)
 
     def test_empty_content_and_empty_pool(self):
-        self.assertEqual(source_aware_order([],user_id='u'),([],{}))
+        self.assertEqual(fully_visible_order([],user_id='u'),([],{}))
         rows=[rec('a',['x'],'alpha'),rec('b',['x'],'')]
-        self.assertEqual(source_aware_order(rows,user_id='u')[1]['b']['status'],'retained')
+        self.assertEqual(fully_visible_order(rows,user_id='u')[1]['b']['status'],'retained')
 
     def test_prefix_complete_marker_coverage_is_not_lost(self):
         rows=[rec('ab',['a','b'],'alpha beta'),rec('a',['a'],'alpha'),rec('g',['g'],'gamma'),rec('b',['b'],'beta')]
-        out,_=source_aware_order(rows,user_id='u')
+        out,_=fully_visible_order(rows,user_id='u')
         for k in range(1,len(rows)+1):
             for marker in ['alpha','beta','alpha beta','gamma']:
                 if any(marker in r['content'] for r in rows[:k]):
@@ -72,6 +77,7 @@ class Pair:
     identity='fixture-not-quality'
     def __init__(self):self.calls=[]
     def score(self,q,docs):self.calls.append((q,list(docs)));return [len(d) for d in docs]
+    def visible_spans(self,q,docs):return [(0,len(d)) for d in docs]
 
 
 class SourceIntegrationTests(unittest.TestCase):
