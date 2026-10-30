@@ -44,12 +44,15 @@ def _span(m,a,b,kind='anchor'):
  return dict(id=m['id'],user_id=m['user_id'],view='source-span',created_at=m['created_at'],roles=[m['role']],source_ids=[m['id']],parent_ids=list(m['parent_ids']),start_char=a,end_char=b,content=m['content'][a:b],kind=kind,session_id=m['session_id'],seq=m['seq'])
 
 
-def make_candidates(resolved,query,tokenizer,*,max_pair_tokens=512,window_tokens=384,overlap=64,max_windows=5000):
+def make_candidates(resolved,query,tokenizer,*,max_pair_tokens=512,window_tokens=384,overlap=64,max_windows=5000,role_tokens=None):
  if not isinstance(query,str) or not query.strip():raise ValueError('query required')
  if not 0<=overlap<window_tokens or not 0<window_tokens<max_pair_tokens:raise ValueError('invalid window parameters')
  qlen=tokens(tokenizer,query);candidates=[]
  for m in resolved['messages']:
   role=(m['role'] or '')+': '
+  if role_tokens is not None:
+   from .model_input_budget import compact
+   role=compact(role,tokenizer,role_tokens)
   room=min(window_tokens,max_pair_tokens-qlen-tokenizer.num_special_tokens_to_add(pair=True)-tokens(tokenizer,role)-8)
   if room<32:raise ValueError('query leaves insufficient pair room')
   text=m['content'];offsets=tokenizer(text,add_special_tokens=False,truncation=False,return_offsets_mapping=True)['offset_mapping']

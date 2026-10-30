@@ -5,13 +5,15 @@ content is the complete budgeted rendering used by the offline consumer.
 """
 import hashlib
 import threading
-from .api import MemoryService, validate_search_payload
+import uuid
+from .model_input_budget import compact, model_query, request_context, event, logger, ROLE_TOKENS
+from .api import MemoryService, validate_search_payload, ApiError
 from .config import RetrieverConfig
-from .parent_window_scoring import ParentWindowRetriever
+from .reliable_parent_window import ReliableParentWindowRetriever as ParentWindowRetriever
 from . import source_evidence_output as output
 
 MODEL_HASH = '781f3f03fe04bf180ba0d912b6ee7f0177cf793176b5a317a8a5e0e8e7036559'
-PROFILE = 'fixed-parent-384-64-max-source-8k-v1'
+PROFILE = 'fixed-parent-384-64-max-source-8k-query256-v2'
 
 class FixedWindowService(MemoryService):
     def __init__(self, config, db=None):
@@ -43,27 +45,59 @@ class FixedWindowService(MemoryService):
         data = validate_search_payload(payload, top_k_max=self.config.top_k_max)
         if data['top_k'] == 0:
             return {'data': []}
-        with self._request_lock:
-            result = self.db.search(user_id=data['user_id'], query=data['query'],
-                                    top_k=100, options=data['options'])
-            if not result.results:
-                return {'data': []}
-            if any('fallback' in flag for r in result.results for flag in r.evidence_flags):
-                raise RuntimeError('fixed-window scoring unavailable')
-            with self.db.connection() as con:
-                resolved = output.resolve_sources(con, result.results,
-                    user_id=data['user_id'], parent_limit=min(20, data['top_k']))
-            # All tokenizer and graph use is serialized with the same owner lock.
-            with self.db._pair_lock:
-                backend = self.db.pair_backend
-                candidates = output.make_candidates(resolved, data['query'], backend.tokenizer)
-                scored = output.score_candidates(candidates, data['query'], backend)
-                pack = output.selected_output(resolved, scored, budget=8192,
-                                              tokenizer=backend.tokenizer)
-            if not pack['pieces']:
-                return {'data': []}
-            digest = hashlib.sha256((data['user_id']+'\0'+pack['rendered']).encode()).hexdigest()
-            return {'data': [{'id': 'source-pack-'+digest, 'content': pack['rendered']}]}
+        stage = 'query_budget'
+        with self._request_lock, self.db._pair_lock:
+            backend = self.db.pair_backend
+            request_id = uuid.uuid4().hex
+            try:
+                parent_query = model_query(data['query'],
+                    data['options'] if self.db.flags.get('use_options', True) else [], backend.tokenizer)
+                source_query = compact(data['query'], backend.tokenizer)
+                with request_context(request_id, parent_query) as state:
+                    event('query_budget', 'bounded', parent_tokens=output.tokens(backend.tokenizer,parent_query),
+                          source_tokens=output.tokens(backend.tokenizer,source_query),
+                          shortened=source_query!=data['query'])
+                    stage = 'recall'
+                    result = self.db.search(user_id=data['user_id'], query=data['query'],
+                                            top_k=100, options=data['options'])
+                    if not result.results:
+                        return {'data': []}
+                    if any('fallback' in flag for r in result.results for flag in r.evidence_flags):
+                        event('retrieval', 'retrieval_fallback', parents=len(result.results))
+                    stage = 'source_validation'
+                    with self.db.connection() as con:
+                        resolved = output.resolve_sources(con, result.results,
+                            user_id=data['user_id'], parent_limit=min(20, data['top_k']))
+                    stage = 'source_candidates'
+                    try:
+                        candidates = output.make_candidates(resolved, source_query, backend.tokenizer,
+                                                            role_tokens=ROLE_TOKENS)
+                        stage = 'source_score'
+                        scored = output.score_candidates(candidates, source_query, backend)
+                    except Exception as error:
+                        event(stage, 'raw_source_prefix_fallback', error,
+                              sources=len(resolved['messages']))
+                        # Fallback uses only validated original messages, never aggregate text.
+                        raw = dict(resolved, parents=[dict(m,view='message',source_ids=[m['id']])
+                                                     for m in resolved['messages']])
+                        stage = 'source_prefix'
+                        pack = output.prefix_output(raw, budget=8192, tokenizer=backend.tokenizer)
+                    else:
+                        stage = 'source_pack'
+                        pack = output.selected_output(resolved, scored, budget=8192,
+                                                      tokenizer=backend.tokenizer)
+                    if not pack['pieces']:
+                        return dict(data=[], **({'degraded':True} if state['degraded'] else {}))
+                    digest = hashlib.sha256((data['user_id']+'\0'+pack['rendered']).encode()).hexdigest()
+                    response = {'data': [{'id': 'source-pack-'+digest, 'content': pack['rendered']}]}
+                    if state['degraded']:
+                        response['degraded'] = True
+                    return response
+            except Exception as error:
+                # Source integrity and storage failures must never become successful evidence.
+                logger.error('fixed_window_failure request=%s stage=%s type=%s',
+                             request_id, stage, type(error).__name__)
+                raise ApiError(503, 'evidence service temporarily unavailable') from None
 
     def health(self):
         return dict(super().health(), evidence_profile=PROFILE)

@@ -3,7 +3,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from aml_retriever.config import RetrieverConfig
-from aml_retriever.parent_window_scoring import ParentWindowRetriever
+from aml_retriever.reliable_parent_window import ReliableParentWindowRetriever as ParentWindowRetriever
 from aml_retriever.fixed_window_service import FixedWindowService
 from aml_retriever import source_evidence_output as output
 from aml_retriever.server import RetrieverServer
@@ -38,11 +38,11 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.svc.official_search(self.query(k=0)),{'data':[]})
         self.assertEqual(self.svc.official_add(self.payload)['success'],True)
         self.assertEqual(self.db.count('u'),2)
-    def test_fallback_rejected(self):
+    def test_fallback_is_explicit(self):
         r=self.db.search(user_id='u',query='TAIL trip',top_k=100)
         r.results[0].evidence_flags.append('parent_window_fallback')
         with patch.object(self.db,'search',return_value=r):
-            with self.assertRaises(RuntimeError):self.svc.official_search(self.query())
+            self.assertTrue(self.svc.official_search(self.query())['degraded'])
     def test_concurrent_queries_have_same_pack(self):
         expected=self.svc.official_search(self.query())
         with ThreadPoolExecutor(max_workers=4) as ex:
@@ -56,7 +56,7 @@ class ServiceTests(unittest.TestCase):
         base='http://127.0.0.1:'+str(server.server_port)
         try:
             health=json.load(urllib.request.urlopen(base+'/health'))
-            self.assertEqual(health['evidence_profile'],'fixed-parent-384-64-max-source-8k-v1')
+            self.assertEqual(health['evidence_profile'],'fixed-parent-384-64-max-source-8k-query256-v2')
             req=urllib.request.Request(base+'/search',data=json.dumps(self.query()).encode(),headers={'Content-Type':'application/json'})
             with self.assertRaises(urllib.error.HTTPError) as err:urllib.request.urlopen(req)
             self.assertEqual(err.exception.code,401)
