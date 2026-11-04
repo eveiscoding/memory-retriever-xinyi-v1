@@ -1,342 +1,168 @@
-# FlowGrid AML Retriever
+# memory-retriever-xinyi-v1
 
-Deterministic, evidence-first memory retrieval for the
-[Agent Memory Leaderboard](https://agentmemories.ai/leaderboard/).
+A user-isolated conversation memory service with synchronous Add/Search APIs,
+SQLite FTS5 recall, deterministic ranking features, and optional local ONNX
+cross-encoder reranking.
 
 [中文说明](README.zh-CN.md) · [API contract](docs/API_CONTRACT.md) ·
-[Evaluation methodology](docs/EVAL.md) · [Data lifecycle](docs/DATA_LIFECYCLE.md)
+[Pair reranking](docs/PAIR_RERANK.md) · [Indexed writes](docs/INDEXED_FTS_WRITES.md)
 
-FlowGrid AML Retriever implements the two operations required from a memory
-system: synchronous `Add` and user-isolated `Search`. It stores every original
-message, builds traceable retrieval views, and returns ranked source evidence.
-It does not generate final answers.
+## Released implementation
 
-Cross-branch HTTP benchmarks are maintained separately in the private
-[memory-retriever-xinyi-benchmarks](https://github.com/eveiscoding/memory-retriever-xinyi-benchmarks)
-repository. Keep its code and datasets fixed when comparing core branches.
-See [benchmark migration](docs/BENCHMARK.md). Engine unit tests and legacy
-implementation-specific ablations remain here; they do not replace the
-independent HTTP benchmark suite.
+This master release integrates the implementation evaluated at
+`888a3b9b793a3c6c97314cf60ef5d22fcba929aa`. Subsequent README and license
+commits do not change the evaluated runtime code. The frozen reference is
+`codex/smoke-20261027-rrf-indexed-parallel2`.
 
-## Leaderboard result
+| Recorded official run | Result |
+| --- | --- |
+| Textual Full task | `teval_e41f7a2ec090ddd1` |
+| Run label | `full-20261027-rrf-v2-888a3b9` |
+| Completion | 2026-10-30 12:29:55 UTC+8 |
+| Status / Overall | Succeeded / **50.62** |
+| Evaluation progress | 9602 / 9602 |
 
-| Track | Entry | Rank | Score | Evaluated version |
-| --- | --- | ---: | ---: | --- |
-| Text Memory · Open-source / Academic Methods, first public snapshot | `FlowGrid_AML_Retriever` | **#8** | **43.98** | v1.0 |
+This is the recorded result for the pinned code and deployment profile below.
+It is not a new evaluation of the documentation commit or a public leaderboard
+ranking. The API returns retrieval evidence; answer generation and grading are
+performed by the evaluation platform.
 
-The top score in that snapshot was 45.06, a difference of 1.08 points. The
-current repository is v1.1.0; its guarded temporal-evidence changes have local
-synthetic ablation evidence but have not been assigned a new official score.
+## How it works
 
-## What it does
+1. **Add:** validate the request, persist original messages in SQLite, and update
+   FTS5 plus deterministic features before acknowledging success. Request IDs are
+   idempotent within a user scope.
+2. **Views:** retain raw messages alongside sliding windows and session segments.
+   Source message IDs link aggregate evidence back to the original messages.
+3. **Recall:** combine FTS5 candidates with a bounded deterministic feature scan.
+   Exact terms, entities, dates/numbers, relative recency, and guarded update
+   signals contribute to ranking. Options can participate in recall.
+4. **Rerank:** the evaluated profile scores the first 100 candidates with a local
+   MiniLM cross-encoder, then fuses model rank with baseline rank using RRF.
+5. **Output:** deduplicate and preserve raw-message coverage, then return at most
+   the requested number of evidence records. All retrieval is scoped by user_id.
 
-- Synchronously persists each `Add` request before returning success.
-- Makes newly added memories immediately searchable.
-- Enforces strict retrieval isolation by `user_id`.
-- Replays duplicate `(request_id, user_id)` writes idempotently.
-- Preserves every original message and links derived views back to source IDs.
-- Generates FTS5, deterministic-feature, and optional dense candidates
-  independently, then combines them with configurable reciprocal-rank fusion.
-- Persists embeddings in SQLite with model identity/hash metadata and preserves
-  each channel's input rank in result provenance.
-- Applies guarded temporal supersession as a soft ranking signal; older evidence
-  remains stored and retrievable.
-- Runs with Python's standard library and SQLite FTS5, with no third-party
-  Python package in the default path.
+Indexed FTS writes avoid global document-ID scans. SQLite uses WAL, a read
+connection pool, a serialized write lock, and bounded busy retries. The pooled
+ONNX backend owns exactly two independent tokenizer/model sessions; each Search
+borrows one for its scoring call.
 
-## Architecture
+## Local quick start
 
-```text
-HTTP Add/Search
-      │
-      ▼
-Contract validation and field mapping
-      │
-      ▼
-Memory service
-  ├─ user isolation
-  ├─ idempotency
-  └─ deletion lifecycle
-      │
-      ▼
-Evidence retriever
-  ├─ original messages
-  ├─ sliding windows
-  ├─ session segments
-  ├─ independent FTS5, deterministic-feature, and dense channels
-  └─ configurable RRF, temporal signals, provenance, and deduplication
-      │
-      ▼
-Ranked source evidence — no answer generation
-```
-
-The HTTP wrapper is intentionally separate from the retrieval engine. Protocol
-changes remain in `api.py` and `server.py`; storage and ranking stay independently
-testable.
-
-## Quick start
-
-Requirements:
-
-- Python 3.11 or newer
-- Python's `sqlite3` linked with FTS5
+Requires Python 3.11+ and SQLite with FTS5. The default lexical/deterministic
+profile uses Python's standard library; model reranking is opt-in.
 
 ```bash
-git clone https://github.com/dlxeva/flowgrid-aml-retriever.git
-cd flowgrid-aml-retriever
-
-# Environment check, unit tests, CLI self-check, and HTTP contract smoke checks
-./scripts/run_tests.sh
-
-# Start on 127.0.0.1:8080 with ./aml.db
-./scripts/serve.sh
+git clone https://github.com/eveiscoding/memory-retriever-xinyi-v1.git
+cd memory-retriever-xinyi-v1
+python3 -m unittest discover -s tests
+python3 scripts/smoke_api.py
+python3 -m aml_retriever.cli serve --db ./aml.db --host 127.0.0.1 --port 8080
 ```
 
-No `pip install` step is required.
-
-### Add a memory
+In another terminal:
 
 ```bash
 curl -sS http://127.0.0.1:8080/add \
   -H 'Content-Type: application/json' \
-  -d '{
-    "request_id": "req-1",
-    "user_id": "user-1",
-    "session_id": "session-1",
-    "messages": [
-      {
-        "role": "user",
-        "timestamp": 1785945600000,
-        "content": "The launch date moved to August 14, 2026."
-      }
-    ]
-  }'
-```
+  -d '{"request_id":"demo-1","user_id":"demo-user","session_id":"demo-session","messages":[{"role":"user","content":"My preferred meeting time is Tuesday morning."}]}'
 
-Successful `Add` responses are returned only after the memory is durable and
-searchable:
-
-```json
-{
-  "success": true,
-  "request_id": "req-1",
-  "user_id": "user-1",
-  "session_id": "session-1"
-}
-```
-
-### Search for evidence
-
-```bash
 curl -sS http://127.0.0.1:8080/search \
   -H 'Content-Type: application/json' \
-  -d '{
-    "query": "When is the launch?",
-    "user_id": "user-1",
-    "top_k": 10
-  }'
+  -d '{"user_id":"demo-user","query":"When do I prefer meetings?","top_k":10}'
 ```
 
-```json
-{
-  "data": [
-    {
-      "id": "...",
-      "content": "The launch date moved to August 14, 2026.",
-      "score": 12.34,
-      "created_at": "2026-08-05T16:00:00Z",
-      "view": "message",
-      "source_message_ids": ["..."],
-      "evidence_flags": ["lexical", "channel:fts", "channel:feature"],
-      "channel_ranks": {"fts": 1, "feature": 1}
-    }
-  ]
-}
-```
+Add returns `success` and echoes `request_id/user_id/session_id`. Search returns
+`{"data":[{"id":"...","content":"..."}]}`, with optional score, timestamp and
+provenance. GET `/health` is unauthenticated. Use `AML_AUTH_MODE=bearer` and
+`AML_API_KEY` to protect Add/Search. Admin endpoints are disabled by default.
+The API schema and validation details are in [API_CONTRACT](docs/API_CONTRACT.md).
 
-`view`, `source_message_ids`, `evidence_flags`, and `channel_ranks` provide optional provenance.
-Set `AML_INCLUDE_PROVENANCE=0` to omit them.
+## Evaluated ONNX/RRF profile
 
-## Docker
+The Full run enabled the following profile rather than the default model-free
+configuration:
+
+| Setting | Value |
+| --- | --- |
+| Model | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` |
+| Model snapshot revision | `1427fd652930e4ba29e8149678df786c240d8825` |
+| ONNX artifact | `onnx/model_quint8_avx2.onnx`, CPU INT8 AVX2 |
+| Query/document pair context | 512 tokens; document side is truncated |
+| Rerank pool / fusion | 100 / RRF, weight 0.25, k=60 |
+| Inference | Two independent sessions, batch=1, threads=1 per session |
+| Dense recall / embedding rerank | Disabled in this profile |
+| Exact / Top20 pair protection | Disabled in this profile |
+| Platform Add / Search concurrency | 16 / 16 |
+
+Prepare the pinned tokenizer files and ONNX artifact in an absolute local
+snapshot directory. The backend loads local files only and hashes model assets;
+it does not download a model during startup.
 
 ```bash
-docker build -t flowgrid-aml-retriever:local .
+python3 -m pip install numpy==1.26.4 onnxruntime==1.20.1 transformers==4.48.3 sentencepiece==0.2.0
 
-# Verify FTS5 and the full test suite inside the image
-docker run --rm flowgrid-aml-retriever:local \
-  python -c "import sqlite3; sqlite3.connect(':memory:').execute('create virtual table t using fts5(x)'); print('FTS5 OK')"
-docker run --rm flowgrid-aml-retriever:local \
-  python -m unittest discover -s tests
-docker run --rm flowgrid-aml-retriever:local \
-  python scripts/smoke_api.py
+export AML_PAIR_MODEL_PATH="/absolute/path/to/mmarco-mMiniLMv2-L12-H384-v1"
+export AML_PAIR_ONNX_FILE="onnx/model_quint8_avx2.onnx"
+export AML_PAIR_BACKEND="aml_retriever.onnx_pair_backend:create_pooled_backend"
+export AML_FLAG_PAIR_RERANK=1
+export AML_PAIR_RERANK_POOL=100
+export AML_PAIR_RERANK_MODE=rrf
+export AML_PAIR_RRF_WEIGHT=0.25
+export AML_PAIR_RRF_K=60
+export AML_PAIR_MAX_LENGTH=512
+export AML_PAIR_BATCH_SIZE=1
+export AML_PAIR_THREADS=1
+export AML_FLAG_VECTOR=0
+export AML_FLAG_SEMANTIC_RERANK=0
+export AML_FLAG_PAIR_TOP20_PROTECT=0
+export AML_FLAG_PAIR_EXACT_PROTECT=0
+export AML_MAX_INFLIGHT=32
 
-# Persistent service
-docker run --rm -p 8080:8080 \
-  -v "$PWD/data:/data" \
-  -e AML_DB_PATH=/data/aml.db \
-  flowgrid-aml-retriever:local
+python3 -m aml_retriever.cli serve --db ./aml-rrf.db --host 127.0.0.1 --port 8080 --quiet
 ```
 
-The container runs as a non-root user and exposes an unauthenticated `/health`
-endpoint. Bearer, Token, and `X-Api-Key` authentication are available for Add,
-Search, statistics, and deletion endpoints.
+Set authentication separately for an externally reachable deployment. The code
+supports additional dense and semantic experiments, but those switches are not
+part of this Full profile. See [PAIR_RERANK](docs/PAIR_RERANK.md) for fallback,
+fusion, and model identity behavior.
 
-## Retrieval pipeline
+## Containers and verification
 
-1. **Persist original evidence.** Messages are stored unchanged, with stable
-   IDs and request-level idempotency.
-2. **Build multiple views.** Message, sliding-window, and session-segment views
-   provide different recall surfaces without replacing the source messages.
-3. **Generate candidates independently.** FTS5, a bounded deterministic scan,
-   and an optional persisted dense index each produce their own ranked list;
-   optional answer choices can contribute query terms.
-4. **Score deterministic signals.** Exact substrings, token coverage, entities,
-   numbers, dates, recency, and neighboring context contribute independent
-   evidence.
-5. **Handle updates conservatively.** A newer near-duplicate receives a soft
-   boost only when the query is temporal and explicit update language is
-   present. The earlier evidence is demoted, never deleted.
-6. **Fuse and deduplicate.** Weighted reciprocal-rank fusion combines all
-   enabled channels before deterministic tie-breaking, while `channel_ranks`
-   records the source rank from every channel that retrieved an item.
-
-### Optional dense backend
-
-The default remains the standard-library-only path: leave `dense_backend` empty
-and `flags.vector=false`. For a deterministic local smoke backend, configure
-`dense_backend="hashing-v1"` and enable `flags.vector`. A production model can be
-provided as `module:factory`; the factory receives `dimension=...` and returns
-an object with `identity`, `model_hash`, `dimension`, and `embed(texts)`. Model
-packages are imported only after that backend is explicitly configured. Dense
-RRF weight defaults to the conservative `0.1`; increase it only with a locked
-model-specific retrieval comparison.
-
-For the Cycle 2 Academic/Open-source track, the included Alibaba Cloud Model
-Studio backend calls the required `text-embedding-v4` model through its
-OpenAI-compatible endpoint. Create a Model Studio workspace and API key, then
-configure deployment secrets (never commit the key):
+- `Dockerfile` builds the standard-library service.
+- `Dockerfile.onnx` adds pinned CPU ONNX dependencies. Model assets must be
+  mounted separately and the profile above must be explicitly configured.
+- `Dockerfile.rrf-parallel` preserves the historical frozen dependency image;
+  its `flowgrid-rrf-frozen-base:20261022` base must already be available locally.
 
 ```bash
-export DASHSCOPE_API_KEY="..."
-export DASHSCOPE_BASE_URL="https://<workspace-id>.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
-export AML_DENSE_BACKEND="aml_retriever.dashscope_embedding:create_backend"
-export AML_DENSE_DIMENSION="1024"
-export AML_FLAG_VECTOR="true"
+python3 -m unittest discover -s tests
+python3 -m aml_retriever.cli selfcheck
+python3 scripts/smoke_api.py
 ```
 
-Create the API key and workspace in Singapore (`ap-southeast-1`) to match this
-endpoint. For the supplied production Compose configuration, copy `.env.example` to
-`.env`, replace all placeholders, and run `docker compose up --build`. The
-`.env` file is ignored by Git.
+These are functional checks with synthetic fixtures, not official quality
+measurements. Tests for optional backends use fixtures/mocks and do not establish
+real-model performance. Service data, keys, official inputs, and evaluation
+outputs are not included in the repository.
 
-The backend batches at most 10 texts per request, retries HTTP 429 and transient
-5xx/network failures, and rejects incomplete or wrong-width vectors. The first
-startup after enabling it backfills embeddings for existing stored evidence.
+## Limits and data handling
 
-All ranking controls live in `RetrieverConfig` and can be disabled independently
-for ablation.
+SQLite is a single-node store. Cross-encoder scoring adds latency and is bounded
+by the two model owners. The default lexical profile and the evaluated model
+profile have different retrieval behavior. Model-visible document text is limited
+by the pair context even when a returned evidence record contains more text.
+Temporal/update heuristics are ranking signals and do not resolve facts into a
+canonical truth store.
 
-## Evaluation
+Raw messages remain stored with provenance. Deletion and stale-user cleanup are
+available; per-run evaluation retention must be audited separately. See
+[DATA_LIFECYCLE](docs/DATA_LIFECYCLE.md). Model artifacts have their own upstream
+license terms.
 
-The repository includes a deterministic synthetic evaluation harness for
-regression testing and ablation. These metrics are development evidence, not a
-substitute for the official leaderboard score.
+## Source and license
 
-`classic`, medium, mixed difficulty, seeds 20260806–20260808, `top_k=100`:
+Original reference repository: https://github.com/dlxeva/flowgrid-aml-retriever
 
-| Configuration | Recall@20 mean (range) | Recall@100 | MRR mean (range) |
-| --- | ---: | ---: | ---: |
-| v1.0 baseline (`L5_plus_weighted_rrf`) | 0.9948 (0.9870–1.0000) | 1.0000 | 0.6728 (0.6631–0.6791) |
-| v1.1 guarded supersession (`L9_guarded_supersession`) | 0.9948 (0.9870–1.0000) | 1.0000 | 0.6948 (0.6854–0.7004) |
-
-The v1.1 default preserved Recall@20 across all three seeds while improving MRR
-on each seed. A more aggressive temporal weight improved MRR further but reduced
-Recall@20 on one seed, so it was not selected.
-
-Reproduce a run with:
-
-```bash
-python3 scripts/run_eval.py \
-  --scale medium \
-  --difficulty mixed \
-  --suite classic \
-  --seeds 20260806,20260807,20260808 \
-  --top-k 100
-```
-
-Generated reports are written to the ignored `eval_out/` directory. See
-[docs/EVAL.md](docs/EVAL.md) for metric definitions, controls, known regressions,
-and the full ablation history.
-
-## Privacy and deletion
-
-- Memory content is never written to service logs.
-- Searches are scoped to exactly one `user_id`.
-- `/health` and `/stats` never return memory content.
-- Configuration rendering redacts authentication secrets.
-- `delete-user` removes messages, views, FTS rows, request records, and session
-  cursors for one user.
-- `purge --yes` clears the complete database.
-
-```bash
-python3 -m aml_retriever.cli delete-user --db ./aml.db --user user-1
-python3 -m aml_retriever.cli purge --db ./aml.db --yes
-```
-
-For file-backed SQLite, remove the database together with its `-wal` and `-shm`
-files when destroying an instance. See [docs/DATA_LIFECYCLE.md](docs/DATA_LIFECYCLE.md).
-
-The repository contains synthetic fixtures and handwritten examples only; it
-does not contain leaderboard evaluation data.
-
-## Known limitations
-
-- The default retrieval path is lexical and deterministic. Semantically distant
-  paraphrases, especially temporal paraphrases, remain the main weakness.
-- Guarded supersession is a ranking signal, not truth resolution. Conflicting
-  and historical evidence remains available by design.
-- Chinese tokenization uses character unigrams and bigrams rather than a
-  language model or full morphological segmenter.
-- SQLite is a single-node backend. WAL mode, retries, and a read pool handle the
-  evaluated concurrency shape, but the implementation is not horizontally
-  distributed.
-- Synthetic evaluation supports controlled comparison; only an official run can
-  establish an official score for a new version.
-
-## Repository layout
-
-```text
-aml_retriever/
-  api.py          Add/Search contract and memory service
-  server.py       HTTP transport
-  retriever.py    storage, candidate generation, scoring, and reranking
-  views.py        message, window, and session-segment views
-  features.py     deterministic feature extraction
-  config.py       configuration and ablation flags
-  store.py        lexical baseline retained for regression testing
-  cli.py          service, data, and self-check commands
-  evaluation/     synthetic datasets, metrics, and ablation harness
-scripts/
-  serve.sh        local service launcher
-  run_tests.sh    complete local verification
-  smoke_api.py    HTTP contract smoke suite
-  run_eval.py     reproducible ablation runner
-  run_scan.py     parameter scan runner
-docs/
-  API_CONTRACT.md
-  EVAL.md
-  DATA_LIFECYCLE.md
-Dockerfile
-config.example.json
-```
-
-## Project boundary
-
-FlowGrid AML Retriever is an independent leaderboard implementation. It applies
-FlowGrid's ideas of provenance, temporal state, conflict preservation, and user
-isolation, but it is not the FlowGrid Core product and its leaderboard results
-should not be interpreted as validation of FlowGrid Core.
-
-## License
-
-Licensed under the [MIT License](LICENSE).
+This repository is distributed under the [MIT License](LICENSE). The license
+retains the original copyright notice and includes the copyright for modifications.
